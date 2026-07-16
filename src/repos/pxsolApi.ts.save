@@ -1,0 +1,19 @@
+import { addDays, addMonths, formatDate } from "../utils/dateUtils";
+
+export const pxsolEndpoints = {
+  rooms: () =>
+    `${process.env.PX_BASE_URL}/hotels/${process.env.PX_HOTEL_ID}/rooms`,  
+
+  availability: () => {
+    const today = new Date();
+
+    const startDate = today;
+    const endDate = addMonths(startDate, 3);
+
+    return `${process.env.PX_BASE_URL}/hotels/${process.env.PX_HOTEL_ID}/availability` +
+      `?start_date=${formatDate(startDate)}` +
+      `&end_date=${formatDate(endDate)}`;
+  },
+  updateRates: () =>
+    `${process.env.PX_BASE_URL}/hotels/${process.env.PX_HOTEL_ID}/availability`
+};

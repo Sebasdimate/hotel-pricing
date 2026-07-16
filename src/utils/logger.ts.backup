@@ -1,0 +1,28 @@
+import { createLogger, format, transports } from "winston";
+
+const { combine, timestamp, printf, colorize, splat } = format;
+
+const logFormat = printf(({ level, message, timestamp, ...meta }) => {
+  const metaString =
+    meta && Object.keys(meta).length > 0
+      ? ` | meta=${JSON.stringify(meta, null, 2)}`
+      : "";
+
+  return `[${timestamp}] ${level}: ${message}${metaString}`;
+});
+
+export const logger = createLogger({
+  level: "info",
+  format: combine(
+    splat(), // 🔥 CLAVE
+    timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+    logFormat
+  ),
+  transports: [
+    new transports.Console({
+      format: combine(colorize(), splat(), timestamp(), logFormat),
+    }),
+    new transports.File({ filename: "logs/error.log", level: "error" }),
+    new transports.File({ filename: "logs/combined.log" }),
+  ],
+});

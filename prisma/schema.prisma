@@ -1,0 +1,73 @@
+generator client {
+  provider      = "prisma-client-js"
+  engineType    = "binary"
+  binaryTargets = ["native"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Modelos de las tablas
+
+model Category {
+  id              Int        @id @default(autoincrement())
+  name            String
+  description     String?  
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  pricingConfig   Json?
+  roomCategories  RoomCategory[]
+  priceOverrides  PriceOverride[]
+}
+
+model Room {
+  id              Int         @id @default(autoincrement())
+  externalId      String      @unique
+  code            String?
+  name            String?
+  description     String?     @db.Text
+  ratePlan        String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  roomCategories  RoomCategory[]
+}
+
+model PriceOverride {
+  id              Int       @id @default(autoincrement())
+  categoryId      Int
+  name            String?
+  priceInitial    String 
+  addPerPerson    String
+  dateFrom        DateTime
+  dateTo          DateTime
+  createdAt       DateTime  @default(now())
+
+  category        Category  @relation(fields: [categoryId], references: [id])
+
+  @@unique([categoryId, dateFrom, dateTo])
+}
+
+model RoomCategory {
+  id              Int        @id @default(autoincrement())
+  roomId          Int
+  categoryId      Int
+  createdAt       DateTime   @default(now())
+
+  room            Room       @relation(fields: [roomId], references: [id])
+  category        Category   @relation(fields: [categoryId], references: [id])
+
+  @@unique([roomId, categoryId])
+}
+
+model PriceSnapshot {
+  id             Int      @id @default(autoincrement())
+  roomExternalId String
+  date           DateTime
+  price          Int
+  updatedAt      DateTime @updatedAt
+
+  @@unique([roomExternalId, date])
+  @@index([roomExternalId])
+}

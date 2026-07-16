@@ -1,0 +1,662 @@
+import { PrismaClient, Prisma } from "@prisma/client";
+import { logger } from "../../utils/logger";
+
+const globalForPrisma = global as unknown as {
+  prisma?: PrismaClient;
+};
+
+// Crear una sola instancia (evita duplicados en desarrollo)
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    log: ["info", "warn", "error"],
+  });
+
+// Guardar instancia global en desarrollo (para hot reload)
+if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+
+// Conectar y registrar eventos
+(async () => {
+  try {
+    await prisma.$connect();
+    logger.info("✅ Conectado a la base de datos correctamente.");
+  } catch (error: any) {
+    logger.error(`❌ Error al conectar a la base de datos: ${error.message}`);
+  }
+})();
+
+// Cierre limpio del cliente
+process.on("beforeExit", async () => {
+  logger.info("🔌 Cerrando conexión con la base de datos...");
+  await prisma.$disconnect();
+});
+import axios from "axios";
+import axiosRetry from "axios-retry";
+import { logger } from "../../utils/logger";
+
+const client = axios.create({
+  timeout: 10000,
+  headers: { "Content-Type": "application/json" },
+});
+
+axiosRetry(client, {
+  retries: 3,
+  retryDelay: axiosRetry.exponentialDelay,
+  shouldResetTimeout: true,
+  retryCondition: (error) => {
+    // retry on network failures & 5xx
+    return axiosRetry.isNetworkError(error) || axiosRetry.isRetryableError(error);
+  },
+});
+
+client.interceptors.request.use(
+  (config) => {
+    const token = process.env.PX_API_KEY;
+
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    logger.info("➡️ Request:", {
+      url: config.url,
+      method: config.method,
+    });
+
+    return config;
+  },
+  (error) => {
+    logger.error("Error en request interceptor", { message: error.message });
+    return Promise.reject(error);
+  }
+);
+
+client.interceptors.response.use(
+  res => res,
+  err => {
+    logger.error("HTTP Error", { message: err.message, url: err.config?.url });
+    return Promise.reject(err);
+  }
+);
+
+export default client;
+import { PrismaClient, Prisma } from "@prisma/client";
+import httpClient from "../infra/http/axiosClient";
+import { prisma } from "../infra/prisma/client";
+import { logger } from "../utils/logger";
+import { pxsolEndpoints } from "../repos/pxsolApi";
+import { addMonths, addDays } from "../utils/dateUtils";
+
+type RoomWithCategories = Prisma.RoomGetPayload<{
+  include: {
+    roomCategories: {
+      include: {
+        category: true;
+      };
+    };
+  };
+}>;
+
+type RatePlan = {
+  rate_id: string | number;
+  rates?: Array<{
+    occupancy?: number;
+  }>;
+};
+
+/**
+ * Helpers
+ */
+function normalizeDate(date: Date) {
+  return new Date(date.setHours(0, 0, 0, 0));
+}
+
+function resolveAvailabilityKey(
+  availableCount: number,
+  pricing: Record<string, { price: number }>
+) {
+  if (pricing[String(availableCount)]) {
+    return String(availableCount);
+  }
+
+  const plusKey = Object.keys(pricing).find(k => k.endsWith("+"));
+  if (plusKey) {
+    const min = Number(plusKey.replace("+", ""));
+    if (availableCount >= min) return plusKey;
+  }
+
+  return null;
+}
+
+/**
+ * MAIN
+ */
+export async function runPricingCycle() {
+  logger.info("🚀 Iniciando ciclo de pricing");
+
+  /**
+   * 1 Sync habitaciones
+   */
+  const roomsResp = await httpClient.get(pxsolEndpoints.rooms());
+  const rooms = roomsResp.data.data.rooms;
+
+  for (const r of Object.values<any>(rooms)) {
+    const ratePlanObj = Object.values(r.rate_plans as Record<string, RatePlan>)[0];
+    await prisma.room.upsert({
+      where: { externalId: String(r.room_id) },
+      update: {
+        code: r.code,
+        name: r.name,
+        description: r.description,
+        ratePlan: String(ratePlanObj.rate_id),
+      },
+      create: {
+        externalId: String(r.room_id),
+        code: r.code,
+        name: r.name,
+        description: r.description,
+        ratePlan: String(ratePlanObj.rate_id),
+      },
+    });
+  }
+
+  /**
+   * 2 Precargar datos locales
+   */
+  const roomsDb: RoomWithCategories[] = await prisma.room.findMany({
+    include: {
+      roomCategories: {
+        include: {
+          category: true,
+        },
+      },
+    },
+  });
+
+  const roomMap = new Map<string, RoomWithCategories>(
+    roomsDb.map(r => [r.externalId, r])
+  );
+
+  /**
+   * 3 Ventanas de consulta (API soporta máx 3 meses)
+   */
+  const baseDate = normalizeDate(new Date());
+  const RANGE_MONTHS = 3;
+  const TOTAL_MONTHS = 12;
+
+  for (let offset = 0; offset < TOTAL_MONTHS; offset += RANGE_MONTHS) {
+    const startDate = addMonths(baseDate, offset);
+    const endDate = addDays(startDate, 90);
+
+    logger.info("📅 Procesando rango de fechas", {
+      startDate,
+      endDate,
+    });
+
+    /**
+     * 4 Obtener disponibilidad por rango
+     */
+   /*  const availResp = await httpClient.get(
+      pxsolEndpoints.availability(startDate, endDate)
+    );
+
+    const availability = availResp.data.data.availability; */
+    let availability: any;
+
+    try {
+      const availResp = await httpClient.get(
+        pxsolEndpoints.availability(startDate, endDate)
+      );
+
+      availability = availResp.data.data.availability;
+    } catch (error: any) {
+      logger.error("❌ Error GET availability", {
+        url: pxsolEndpoints.availability(startDate, endDate),
+        status: error?.response?.status,
+        response: error?.response?.data,
+        message: error?.message,
+      });
+
+      continue;
+    }
+
+    /**
+     * 5 Recorrido por fecha (SIN CAMBIOS)
+     */
+    for (const [dateKey, roomsByDate] of Object.entries<any>(availability)) {
+      const date = normalizeDate(new Date(dateKey));
+
+      /**
+       * 5.1 Agrupar disponibilidad por categoría
+       */
+      const categoryAvailability: Record<number, number> = {};
+
+      for (const r of Object.values<any>(roomsByDate)) {
+        if (r.quantity <= 0) continue;
+
+        const room = roomMap.get(String(r.room_id));
+        if (!room) continue;
+
+        for (const rc of room.roomCategories) {
+          categoryAvailability[rc.categoryId] =
+            (categoryAvailability[rc.categoryId] || 0) + 1;
+        }
+      }
+
+      /**
+       * 5.2 Calcular precio por habitación
+       */
+      for (const r of Object.values<any>(roomsByDate)) {
+        if (r.quantity <= 0) continue;
+
+        const room = roomMap.get(String(r.room_id));
+        if (!room || room.roomCategories.length === 0) continue;
+
+        const category = room.roomCategories[0].category;
+        const availableCount = categoryAvailability[category.id] || 0;
+
+        if (!category.pricingConfig) continue;
+
+        const config = category.pricingConfig as any;
+
+        /**
+         * 5.3 Override por fecha
+         */
+        const override = await prisma.priceOverride.findFirst({
+          where: {
+            categoryId: category.id,
+            dateFrom: { lte: date },
+            dateTo: { gte: date },
+          },
+        });
+
+        let basePrice: number;
+
+        if (override) {
+          basePrice = Number(override.priceInitial);
+        } else {
+          const key = resolveAvailabilityKey(
+            availableCount,
+            config.pricingByAvailability
+          );
+          if (!key) continue;
+          basePrice = config.pricingByAvailability[key].price;
+        }
+
+        /**
+         * 5.4 Ocupación
+         */
+        const ratePlan = Object.values<any>(r.rate_plans)[0];
+
+        const occupancyRaw =
+          ratePlan.rates?.[0]?.occupancy ?? config.baseOccupancy;
+
+        const basePriceNum = Number(basePrice);
+        const occupancyNum = Number(occupancyRaw);
+        const baseOccupancyNum = Number(config.baseOccupancy ?? 1);
+        const extraPersonAmountNum = Number(config.extraPersonAmount ?? 0);
+
+        if (
+          !Number.isFinite(basePriceNum) ||
+          !Number.isFinite(occupancyNum) ||
+          !Number.isFinite(baseOccupancyNum) ||
+          !Number.isFinite(extraPersonAmountNum)
+        ) {
+          logger.error("❌ Configuración inválida para cálculo de precio", {
+            room: r.room_id,
+            date: dateKey,
+            basePrice: basePriceNum,
+            occupancy: occupancyNum,
+            baseOccupancy: baseOccupancyNum,
+            extraPersonAmount: extraPersonAmountNum,
+            rawConfig: config,
+          });
+          continue;
+        }
+
+        const finalPrice =
+          basePriceNum +
+          Math.max(0, occupancyNum - baseOccupancyNum) *
+            extraPersonAmountNum;
+
+        /**
+         * 6 Optimización PUT
+         */
+        const snapshot = await prisma.priceSnapshot.findUnique({
+          where: {
+            roomExternalId_date: {
+              roomExternalId: String(r.room_id),
+              date,
+            },
+          },
+        });
+
+        if (snapshot && snapshot.price === finalPrice) {
+          logger.info("Precio sin cambios", {
+            room: r.room_id,
+            date: dateKey,
+            price: finalPrice,
+          });
+          continue;
+        }
+
+        logger.info("Precio calculado", {
+          room: r.room_id,
+          date: dateKey,
+          price: finalPrice,
+        });
+
+        /**
+         * 6.1 PUT actualización precios
+         */
+        const MAX_OCCUPANCY = Math.max(
+          baseOccupancyNum,
+          occupancyNum,
+          4
+        );
+
+        const rates = Array.from({ length: MAX_OCCUPANCY }, (_, i) => {
+          const occ = i + 1;
+
+          return {
+            occupancy: occ,
+            price:
+              basePriceNum +
+              Math.max(0, occ - baseOccupancyNum) *
+                extraPersonAmountNum,
+          };
+        });
+
+        const payload = {
+          [dateKey]: {
+            [String(r.room_id)]: {
+              day: dateKey,
+              room_id: Number(r.room_id),
+              rate_plans: {
+                [String(room.ratePlan)]: {
+                  rate_id: Number(room.ratePlan),
+                  rates,
+                },
+              },
+            },
+          },
+        };
+
+        try {
+          await httpClient.put(
+            pxsolEndpoints.updateRates(),
+            payload
+          );
+        } catch (error: any) {
+          const status = error?.response?.status;
+          const data = error?.response?.data;
+
+          logger.error(
+            `❌ Error PUT updateRates | payload=${JSON.stringify(payload)} status=${status} | response=${JSON.stringify(data)}`
+          );
+
+          throw error;
+        }
+
+        await prisma.priceSnapshot.upsert({
+          where: {
+            roomExternalId_date: {
+              roomExternalId: String(r.room_id),
+              date,
+            },
+          },
+          update: { price: finalPrice },
+          create: {
+            roomExternalId: String(r.room_id),
+            date,
+            price: finalPrice,
+          },
+        });
+      }
+    }
+  }
+
+  logger.info("Ciclo de pricing finalizado");
+}
+import "dotenv/config";
+import { startScheduler } from "./jobs/pricingJob";
+import { logger } from "./utils/logger";
+
+async function main() {
+  logger.info("Arrancando servicio...");
+
+  // Si prefieres migrar por código:
+  // await runMigrations(); // O ejecuta prisma migrate deploy en entrypoint
+
+  // Primer fetch inmediato (encapsulado en el job)
+  await startScheduler(/* immediateRun = true */);
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+import cron from "node-cron";
+import { runPricingCycle } from "../services/pricingService";
+import { logger } from "../utils/logger";
+
+let isRunning = false;
+
+export async function startScheduler() {
+  /**
+   * ▶️ Ejecutar inmediatamente al iniciar la app
+   */
+  if (!isRunning) {
+    try {
+      isRunning = true;
+      logger.info("🚀 Ejecutando primer ciclo de pricing");
+      await runPricingCycle();
+      logger.info("✅ Primer ciclo ejecutado correctamente");
+    } catch (err) {
+      logger.error("❌ Error en primer ciclo", err);
+    } finally {
+      isRunning = false;
+    }
+  }
+
+  /**
+   * ⏱ Ejecutar cada 5 minutos
+   * Cron: minuto divisible por 5
+   */
+  cron.schedule("*/5 * * * *", async () => {
+    if (isRunning) {
+      logger.warn("⏳ Ciclo anterior aún en ejecución, se omite este tick");
+      return;
+    }
+
+    try {
+      isRunning = true;
+      logger.info("🔁 Ejecutando ciclo programado de pricing");
+      await runPricingCycle();
+      logger.info("✅ Ciclo programado ejecutado correctamente");
+    } catch (err) {
+      logger.error("❌ Error en ciclo programado", err);
+    } finally {
+      isRunning = false;
+    }
+  });
+
+  logger.info("🕒 Scheduler de pricing iniciado (cada 5 minutos)");
+}
+import { formatDate } from "../utils/dateUtils";
+
+export const pxsolEndpoints = {
+  rooms: () =>
+    `${process.env.PX_BASE_URL}/hotels/${process.env.PX_HOTEL_ID}/rooms`,  
+
+  availability: (startDate: Date, endDate: Date) => {
+    return (
+      `${process.env.PX_BASE_URL}/hotels/${process.env.PX_HOTEL_ID}/availability` +
+      `?start_date=${formatDate(startDate)}` +
+      `&end_date=${formatDate(endDate)}`
+    );
+  },
+
+  updateRates: () =>
+    `${process.env.PX_BASE_URL}/hotels/${process.env.PX_HOTEL_ID}/availability`
+};
+import { createLogger, format, transports } from "winston";
+
+const { combine, timestamp, printf, colorize, splat } = format;
+
+const logFormat = printf(({ level, message, timestamp, ...meta }) => {
+  const metaString =
+    meta && Object.keys(meta).length > 0
+      ? ` | meta=${JSON.stringify(meta, null, 2)}`
+      : "";
+
+  return `[${timestamp}] ${level}: ${message}${metaString}`;
+});
+
+export const logger = createLogger({
+  level: "info",
+  format: combine(
+    splat(), // 🔥 CLAVE
+    timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+    logFormat
+  ),
+  transports: [
+    new transports.Console({
+      format: combine(colorize(), splat(), timestamp(), logFormat),
+    }),
+    new transports.File({ filename: "logs/error.log", level: "error" }),
+    new transports.File({ filename: "logs/combined.log" }),
+  ],
+});
+/**
+ * Determina si una fecha corresponde a un fin de semana.
+ * @param date Instancia de Date o string convertible a fecha
+ */
+export function isWeekend(date: Date | string): boolean {
+  const d = new Date(date);
+  const day = d.getDay(); // 0 = domingo, 6 = sábado
+  return day === 0 || day === 6;
+}
+
+/**
+ * Determina si una fecha es festivo según una lista predefinida.
+ * Puedes reemplazar este arreglo por una consulta a BD si lo prefieres.
+ */
+const HOLIDAYS: string[] = [
+  "2025-01-01", // Año Nuevo
+  "2025-03-24", // Día de San José
+  "2025-04-17", // Jueves Santo
+  "2025-04-18", // Viernes Santo
+  "2025-05-01", // Día del Trabajo
+  "2025-05-29", // Ascensión del Señor
+  "2025-06-19", // Corpus Christi
+  "2025-06-26", // Sagrado Corazón
+  "2025-07-20", // Independencia
+  "2025-08-07", // Batalla de Boyacá
+  "2025-08-18", // Asunción de la Virgen
+  "2025-10-13", // Día de la Raza
+  "2025-11-03", // Todos los Santos
+  "2025-11-17", // Independencia de Cartagena
+  "2025-12-08", // Inmaculada Concepción
+  "2025-12-25", // Navidad
+];
+
+/**
+ * Determina si una fecha es festivo en Colombia (según lista definida).
+ * @param date Instancia de Date o string
+ */
+export function isHoliday(date: Date | string): boolean {
+  const d = new Date(date);
+  const dateString = d.toISOString().split("T")[0];
+  return HOLIDAYS.includes(dateString);
+}
+
+
+export function formatDate(date: Date) {
+  return date.toISOString().split("T")[0];
+}
+
+export function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+export function addMonths(date: Date, months: number) {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months);
+  return d;
+}generator client {
+  provider      = "prisma-client-js"
+  engineType    = "binary"
+  binaryTargets = ["native"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Modelos de las tablas
+
+model Category {
+  id              Int        @id @default(autoincrement())
+  name            String
+  description     String?  
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  pricingConfig   Json?
+  roomCategories  RoomCategory[]
+  priceOverrides  PriceOverride[]
+}
+
+model Room {
+  id              Int         @id @default(autoincrement())
+  externalId      String      @unique
+  code            String?
+  name            String?
+  description     String?     @db.Text
+  ratePlan        String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  roomCategories  RoomCategory[]
+}
+
+model PriceOverride {
+  id              Int       @id @default(autoincrement())
+  categoryId      Int
+  name            String?
+  priceInitial    String 
+  addPerPerson    String
+  dateFrom        DateTime
+  dateTo          DateTime
+  createdAt       DateTime  @default(now())
+
+  category        Category  @relation(fields: [categoryId], references: [id])
+
+  @@unique([categoryId, dateFrom, dateTo])
+}
+
+model RoomCategory {
+  id              Int        @id @default(autoincrement())
+  roomId          Int
+  categoryId      Int
+  createdAt       DateTime   @default(now())
+
+  room            Room       @relation(fields: [roomId], references: [id])
+  category        Category   @relation(fields: [categoryId], references: [id])
+
+  @@unique([roomId, categoryId])
+}
+
+model PriceSnapshot {
+  id             Int      @id @default(autoincrement())
+  roomExternalId String
+  date           DateTime
+  price          Int
+  updatedAt      DateTime @updatedAt
+
+  @@unique([roomExternalId, date])
+  @@index([roomExternalId])
+}
