@@ -1,4 +1,5 @@
 name: Hotel Pricing Bot
+# Cache buster: v2
 
 on:
   schedule:
