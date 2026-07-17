@@ -38,7 +38,9 @@ jobs:
           EOF
 
       - name: 🚀 Ejecutar ciclo de pricing
-        run: npx ts-node -r tsconfig-paths/register -e "import('./src/jobs/pricingJob').then(m => m.runSingleCycle())"
+        run: npm run dev
+        env:
+          SINGLE_CYCLE: "true"
         timeout-minutes: 10
 
       - name: 📋 Guardar logs
