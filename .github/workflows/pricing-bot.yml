@@ -1,5 +1,9 @@
 name: Hotel Pricing Bot
-# Cache buster: v3-npm-start-fix
+# Workflow Version: v4
+# Last Updated: 2026-07-17
+
+env:
+  WORKFLOW_VERSION: "v4-npm-start-npm-build"
 
 on:
   schedule:
@@ -14,6 +18,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: 🔖 Mostrar versión del workflow
+        run: |
+          echo "════════════════════════════════════════════"
+          echo "🔖 WORKFLOW VERSION: ${{ env.WORKFLOW_VERSION }}"
+          echo "📅 Ejecutado: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "🔗 Commit: ${{ github.sha }}"
+          echo "🏃 Run ID: ${{ github.run_id }}"
+          echo "════════════════════════════════════════════"
+
       - name: 📥 Clonar repositorio
         uses: actions/checkout@v3
 
