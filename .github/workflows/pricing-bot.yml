@@ -1,9 +1,10 @@
 name: Hotel Pricing Bot
-# Workflow Version: v4
-# Last Updated: 2026-07-17
+# Workflow Version: v5
+# Last Updated: 2026-07-17 18:50 UTC
+# Cache Buster: timestamp-18-50
 
 env:
-  WORKFLOW_VERSION: "v4-npm-start-npm-build"
+  WORKFLOW_VERSION: "v5-npm-start-npm-build-cache-cleaned"
 
 on:
   schedule:
