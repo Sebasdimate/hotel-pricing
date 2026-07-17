@@ -18,17 +18,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🔖 Mostrar versión del workflow
-        run: |
-          echo "════════════════════════════════════════════"
-          echo "🔖 WORKFLOW VERSION: ${{ env.WORKFLOW_VERSION }}"
-          echo "📅 Ejecutado: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "🔗 Commit: ${{ github.sha }}"
-          echo "🏃 Run ID: ${{ github.run_id }}"
-          echo "════════════════════════════════════════════"
-
-      - name: 📥 Clonar repositorio
+      - name: 📥 Clonar repositorio (para leer VERSION)
         uses: actions/checkout@v3
+
+      - name: 🔖 Mostrar versión del workflow (VERIFICAR QUE CAMBIOS LLEGARON)
+        run: |
+          VERSION=$(cat VERSION)
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║                   🔖 VERSIÓN DEL WORKFLOW                  ║"
+          echo "╠════════════════════════════════════════════════════════════╣"
+          echo "║ VERSION: $VERSION"
+          echo "║ Ejecutado: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "║ Commit: ${{ github.sha }}"
+          echo "║ Run ID: ${{ github.run_id }}"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "✅ SI VES ESTA VERSIÓN = Los cambios llegaron a GitHub"
+          echo ""
 
       - name: 🔍 Validar GitHub Secrets
         run: |

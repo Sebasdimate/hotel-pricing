@@ -1,16 +1,28 @@
 import "dotenv/config";
 import { startScheduler, runSingleCycle } from "./jobs/pricingJob";
 import { logger } from "./utils/logger";
+import { readFileSync } from "fs";
+import { join } from "path";
 
 async function main() {
   const singleCycleMode = process.env.SINGLE_CYCLE === "true";
   const nodeEnv = process.env.NODE_ENV || "development";
 
-  logger.info("════════════════════════════════════════════");
-  logger.info("🚀 Arrancando servicio");
-  logger.info(`📦 NODE_ENV: ${nodeEnv}`);
-  logger.info(`🔄 SINGLE_CYCLE: ${singleCycleMode}`);
-  logger.info("════════════════════════════════════════════");
+  let version = "unknown";
+  try {
+    const versionFile = join(__dirname, "..", "VERSION");
+    version = readFileSync(versionFile, "utf-8").trim();
+  } catch (err) {
+    // Si no encuentra el archivo, continúa con "unknown"
+  }
+
+  logger.info("╔════════════════════════════════════════════════════════════╗");
+  logger.info("║              🚀 SERVICIO DE PRICING INICIADO              ║");
+  logger.info("╠════════════════════════════════════════════════════════════╣");
+  logger.info(`║ 📦 VERSION: ${version.padEnd(50)} ║`);
+  logger.info(`║ 🌍 NODE_ENV: ${nodeEnv.padEnd(48)} ║`);
+  logger.info(`║ 🔄 SINGLE_CYCLE: ${String(singleCycleMode).padEnd(43)} ║`);
+  logger.info("╚════════════════════════════════════════════════════════════╝");
 
   // ════════════════════════════════════════════════════════
   // Si SINGLE_CYCLE=true (GitHub Actions), ejecutar UN ciclo y terminar
