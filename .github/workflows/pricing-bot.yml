@@ -41,7 +41,7 @@ jobs:
 
       - name: 📋 Guardar logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: pricing-logs-${{ github.run_number }}
           path: logs/
