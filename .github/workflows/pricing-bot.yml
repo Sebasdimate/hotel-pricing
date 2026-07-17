@@ -1,5 +1,5 @@
 name: Hotel Pricing Bot
-# Cache buster: v2
+# Cache buster: v3-npm-start-fix
 
 on:
   schedule:
