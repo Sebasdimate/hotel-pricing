@@ -71,7 +71,7 @@ jobs:
           EOF
 
       - name: 📊 Ejecutar migraciones Prisma
-        run: npm run prisma:generate && npx prisma migrate deploy --skip-generate
+        run: npm run prisma:generate && npx prisma migrate deploy
 
       - name: 🚀 Ejecutar ciclo de pricing
         run: npm start
