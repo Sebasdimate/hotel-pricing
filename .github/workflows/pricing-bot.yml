@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: 📥 Clonar repositorio (para leer VERSION)
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 🔖 Mostrar versión del workflow (VERIFICAR QUE CAMBIOS LLEGARON)
         run: |
@@ -48,7 +48,7 @@ jobs:
           echo "✅ Todos los secrets están configurados"
 
       - name: 🔧 Configurar Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
