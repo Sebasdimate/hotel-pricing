@@ -4,6 +4,21 @@ import { logger } from "../utils/logger";
 
 let isRunning = false;
 
+// ════════════════════════════════════════════════════════
+// PARA GITHUB ACTIONS: Ejecutar SOLO UN CICLO sin scheduler
+// ════════════════════════════════════════════════════════
+export async function runSingleCycle() {
+  logger.info("🚀 Ejecutando ciclo único de pricing (GitHub Actions)");
+  try {
+    await runPricingCycle();
+    logger.info("✅ Ciclo completado exitosamente");
+    process.exit(0);
+  } catch (err) {
+    logger.error("❌ Error en ciclo de pricing", err);
+    process.exit(1);
+  }
+}
+
 export async function startScheduler() {
   /**
    * ▶️ Ejecutar inmediatamente al iniciar la app

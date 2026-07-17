@@ -37,24 +37,7 @@ jobs:
           EOF
 
       - name: 🚀 Ejecutar ciclo de pricing
-        run: |
-          cat > run-single-cycle.js << 'EOF'
-          const { runPricingCycle } = require('./src/services/pricingService');
-
-          (async () => {
-            try {
-              console.log('🚀 Ejecutando ciclo único de pricing...');
-              await runPricingCycle();
-              console.log('✅ Ciclo completado exitosamente');
-              process.exit(0);
-            } catch (error) {
-              console.error('❌ Error en ciclo de pricing:', error);
-              process.exit(1);
-            }
-          })();
-          EOF
-
-          npx ts-node -r tsconfig-paths/register run-single-cycle.js
+        run: npx ts-node -r tsconfig-paths/register -e "import('./src/jobs/pricingJob').then(m => m.runSingleCycle())"
         timeout-minutes: 10
 
       - name: 📋 Guardar logs
