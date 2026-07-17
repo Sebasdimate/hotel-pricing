@@ -29,9 +29,10 @@ jobs:
         run: |
           cat > .env << 'EOF'
           DATABASE_URL=${{ secrets.DATABASE_URL }}
-          PXSOL_API_KEY=${{ secrets.PXSOL_API_KEY }}
-          PXSOL_API_URL=${{ secrets.PXSOL_API_URL }}
-          HOTEL_ID=${{ secrets.HOTEL_ID }}
+          PX_API_KEY=${{ secrets.PXSOL_API_KEY }}
+          PX_BASE_URL=${{ secrets.PXSOL_API_URL }}
+          PX_HOTEL_ID=${{ secrets.HOTEL_ID }}
+          NODE_ENV=prod
           LOG_LEVEL=info
           EOF
 
