@@ -17,6 +17,15 @@ jobs:
       - name: 📥 Clonar repositorio
         uses: actions/checkout@v3
 
+      - name: 🔍 Validar GitHub Secrets
+        run: |
+          echo "Validando secrets necesarios..."
+          if [ -z "${{ secrets.DATABASE_URL }}" ]; then echo "❌ DATABASE_URL no configurado"; exit 1; fi
+          if [ -z "${{ secrets.PXSOL_API_KEY }}" ]; then echo "❌ PXSOL_API_KEY no configurado"; exit 1; fi
+          if [ -z "${{ secrets.PXSOL_API_URL }}" ]; then echo "❌ PXSOL_API_URL no configurado"; exit 1; fi
+          if [ -z "${{ secrets.HOTEL_ID }}" ]; then echo "❌ HOTEL_ID no configurado"; exit 1; fi
+          echo "✅ Todos los secrets están configurados"
+
       - name: 🔧 Configurar Node.js
         uses: actions/setup-node@v3
         with:
@@ -36,9 +45,12 @@ jobs:
           PX_API_KEY=${{ secrets.PXSOL_API_KEY }}
           PX_BASE_URL=${{ secrets.PXSOL_API_URL }}
           PX_HOTEL_ID=${{ secrets.HOTEL_ID }}
-          NODE_ENV=prod
-          LOG_LEVEL=info
+          NODE_ENV=${{ secrets.NODE_ENV || 'production' }}
+          LOG_LEVEL=${{ secrets.LOG_LEVEL || 'info' }}
           EOF
+
+      - name: 📊 Ejecutar migraciones Prisma
+        run: npm run prisma:generate && npx prisma migrate deploy --skip-generate
 
       - name: 🚀 Ejecutar ciclo de pricing
         run: npm start
