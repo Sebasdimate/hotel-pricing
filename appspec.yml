@@ -1,0 +1,34 @@
+version: 0.0
+os: linux
+
+files:
+  - source: /
+    destination: /home/ubuntu/hotel-pricing
+
+hooks:
+  BeforeInstall:
+    - location: scripts/stop.sh
+      timeout: 300
+      runas: ubuntu
+  AfterDownload:
+    - location: scripts/install.sh
+      timeout: 600
+      runas: ubuntu
+  ApplicationStart:
+    - location: scripts/start.sh
+      timeout: 300
+      runas: ubuntu
+
+Permissions:
+  - object: /home/ubuntu/hotel-pricing
+    owner: ubuntu
+    group: ubuntu
+    mode: 755
+    type:
+      - directory
+  - object: /home/ubuntu/hotel-pricing
+    owner: ubuntu
+    group: ubuntu
+    mode: 644
+    type:
+      - file
