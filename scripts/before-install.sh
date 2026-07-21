@@ -4,9 +4,9 @@ set -e
 echo "🧹 Limpiando directorio anterior..."
 pm2 stop hotel-pricing || true
 
-# Eliminar todo menos node_modules (para no reinstalar)
-cd /home/ubuntu/hotel-pricing 2>/dev/null || true
-find . -maxdepth 1 -type f -delete || true
-find . -maxdepth 1 -type d ! -name . ! -name node_modules -exec rm -rf {} + || true
+# Eliminar TODO el directorio
+rm -rf /home/ubuntu/hotel-pricing || true
+mkdir -p /home/ubuntu/hotel-pricing
+chown -R ubuntu:ubuntu /home/ubuntu/hotel-pricing
 
 echo "✅ Directorio limpiado"
