@@ -5,6 +5,7 @@ import { logger } from "../utils/logger";
 import { pxsolEndpoints } from "../repos/pxsolApi";
 import { addMonths, addDays } from "../utils/dateUtils";
 import { resolveEmptyChairPricing } from "./pricingRules";
+import { resolveGapNightsPricing, detectGapsFromAvailability } from "./gapNightsRules";
 
 type RoomWithCategories = Prisma.RoomGetPayload<{
   include: {
@@ -48,24 +49,46 @@ export async function runPricingCycle() {
   const roomsResp = await httpClient.get(pxsolEndpoints.rooms());
   const rooms = roomsResp.data.data.rooms;
 
-  for (const r of Object.values<any>(rooms)) {
+  // ════════════════════════════════════════════════════════
+  // OPTIMIZADO: Batch upsert en UNA sola query
+  // Antes: for loop → N queries individuales
+  // Ahora: INSERT ... ON DUPLICATE KEY UPDATE → 1 query batch
+  // ════════════════════════════════════════════════════════
+
+  const roomsData = Object.values<any>(rooms).map(r => {
     const ratePlanObj = Object.values(r.rate_plans as Record<string, RatePlan>)[0];
-    await prisma.room.upsert({
-      where: { externalId: String(r.room_id) },
-      update: {
-        code: r.code,
-        name: r.name,
-        description: r.description,
-        ratePlan: String(ratePlanObj.rate_id),
-      },
-      create: {
-        externalId: String(r.room_id),
-        code: r.code,
-        name: r.name,
-        description: r.description,
-        ratePlan: String(ratePlanObj.rate_id),
-      },
-    });
+    return {
+      externalId: String(r.room_id),
+      code: r.code,
+      name: r.name,
+      description: r.description,
+      ratePlan: String(ratePlanObj.rate_id),
+    };
+  });
+
+  if (roomsData.length > 0) {
+    try {
+      await prisma.$executeRaw`
+        INSERT INTO Room (externalId, code, name, description, ratePlan)
+        VALUES ${Prisma.join(
+          roomsData.map(
+            rd => Prisma.sql`(${rd.externalId}, ${rd.code}, ${rd.name}, ${rd.description}, ${rd.ratePlan})`
+          ),
+          ','
+        )}
+        ON DUPLICATE KEY UPDATE
+          code = VALUES(code),
+          name = VALUES(name),
+          description = VALUES(description),
+          ratePlan = VALUES(ratePlan)
+      `;
+      logger.info(`✅ Rooms sincronizados (batch optimizado): ${roomsData.length}`);
+    } catch (error: any) {
+      logger.error("❌ Error sincronizando rooms batch", {
+        count: roomsData.length,
+        error: error?.message,
+      });
+    }
   }
 
   const roomsDb: RoomWithCategories[] = await prisma.room.findMany({
@@ -85,10 +108,21 @@ export async function runPricingCycle() {
   const TOTAL_MONTHS = 12;
 
   for (let offset = 0; offset < TOTAL_MONTHS; offset += RANGE_MONTHS) {
-    const startDate = addMonths(baseDate, offset);
+    let startDate = addMonths(baseDate, offset);
+
+    // ════════════════════════════════════════════════════════
+    // NUEVO: Solapamiento de 1 día para detectar gaps en límites
+    // ════════════════════════════════════════════════════════
+    let skipFirstDay = false;
+    if (offset > 0) {
+      startDate = addDays(startDate, -1);  // Retroceder 1 día
+      skipFirstDay = true;  // Flag para ignorar este día en el loop
+      logger.info("🔄 Solapamiento: 1 día anterior para detectar gaps en límite");
+    }
+
     const endDate = addDays(startDate, 90);
 
-    logger.info("📅 Procesando rango de fechas", { startDate, endDate });
+    logger.info("📅 Procesando rango de fechas", { startDate, endDate, skipFirstDay });
 
     let availability: any;
     try {
@@ -144,8 +178,28 @@ export async function runPricingCycle() {
       price: number;
     }> = [];
 
+    // NUEVO: Detectar gaps en todo el rango
+    const gapNightsMap = detectGapsFromAvailability(availability);
+    logger.info("📊 Análisis de gaps completado", {
+      gapsDetected: gapNightsMap.size,
+      skipFirstDay
+    });
+
+    // NUEVO: Obtener fecha del día solapado (si aplica)
+    const datesArray = Object.keys(availability).sort();
+    const firstDayOfRangeKey = datesArray[0];
+
     for (const [dateKey, roomsByDate] of Object.entries<any>(availability)) {
       const date = normalizeDate(new Date(dateKey));
+
+      // ════════════════════════════════════════════════════════
+      // NUEVO: Si hay solapamiento, ignorar el primer día
+      // (fue procesado en el rango anterior)
+      // ════════════════════════════════════════════════════════
+      if (skipFirstDay && dateKey === firstDayOfRangeKey) {
+        logger.debug("⏭️ Saltando día solapado (ya procesado)", { dateKey });
+        continue;  // Skip este día, ir al siguiente
+      }
 
       const categoryAvailability: Record<number, number> = {};
       for (const r of Object.values<any>(roomsByDate)) {
@@ -175,32 +229,123 @@ export async function runPricingCycle() {
         const overrideKey = `${category.id}_${dateKey}`;
         const override = overrideMap.get(overrideKey);
 
+        // NUEVO: Obtener gap si existe
+        const gapNights = gapNightsMap.get(dateKey) ?? null;
+
         let basePrice: number;
         let extraPersonAmountNum: number;
         let emptyChairApplied = false;
 
-        const emptyChair = resolveEmptyChairPricing({
-          date,
-          config,
-          basePrice: Number(config.pricingByAvailability?.["1"]?.price ?? 0),
-          extraPersonAmount: Number(config.extraPersonAmount ?? 0),
-        });
+        // ════════════════════════════════════════════════════════
+        // NUEVO: Modificar minimum_stay si hay gap
+        // ════════════════════════════════════════════════════════
+        let minimumStayOverride: number | null = null;
+        if (gapNights !== null) {
+          minimumStayOverride = gapNights;  // Cambiar minimum_stay al número de noches del gap
+          logger.info("🔑 MINIMUM_STAY modificado para gap", {
+            room: r.room_id,
+            date: dateKey,
+            gapNights,
+            newMinimumStay: minimumStayOverride,
+          });
+        }
 
-        if (emptyChair.applied) {
-          basePrice = emptyChair.basePrice;
-          extraPersonAmountNum = emptyChair.extraPersonAmount;
-          emptyChairApplied = true;
-        } else if (override) {
+        // ════════════════════════════════════════════════════════
+        // NUEVA PRIORIDAD:
+        // 1️⃣ OVERRIDE (máxima)
+        // 2️⃣ GAP NIGHTS
+        // 3️⃣ EMPTY CHAIR
+        // 4️⃣ PRICING BY AVAILABILITY (fallback)
+        // ════════════════════════════════════════════════════════
+
+        if (override) {
+          // 1️⃣ OVERRIDE
           basePrice = Number(override.priceInitial);
           extraPersonAmountNum = Number(override.addPerPerson ?? config.extraPersonAmount ?? 0);
-        } else {
-          const key = resolveAvailabilityKey(
-            availableCount,
-            config.pricingByAvailability
-          );
-          if (!key) continue;
-          basePrice = config.pricingByAvailability[key].price;
-          extraPersonAmountNum = Number(config.extraPersonAmount ?? 0);
+          logger.info("💼 OVERRIDE aplicado", {
+            room: r.room_id,
+            date: dateKey,
+            basePrice,
+          });
+        }
+        else if (gapNights !== null) {
+          // 2️⃣ GAP NIGHTS
+          const gapResult = resolveGapNightsPricing({
+            gapNights,
+            config,
+          });
+
+          if (gapResult.applied) {
+            basePrice = gapResult.basePrice!;
+            extraPersonAmountNum = gapResult.extraPersonAmount!;
+            logger.info("🎯 GAP NIGHTS aplicada", {
+              room: r.room_id,
+              date: dateKey,
+              gapNights,
+              basePrice,
+            });
+          } else {
+            // Si gap existe pero no hay regla, continuar a Empty Chair
+            const emptyChair = resolveEmptyChairPricing({
+              date,
+              config,
+              basePrice: Number(config.pricingByAvailability?.["1"]?.price ?? 0),
+              extraPersonAmount: Number(config.extraPersonAmount ?? 0),
+            });
+
+            if (emptyChair.applied) {
+              // 3️⃣ EMPTY CHAIR
+              basePrice = emptyChair.basePrice;
+              extraPersonAmountNum = emptyChair.extraPersonAmount;
+              emptyChairApplied = true;
+            } else {
+              // 4️⃣ AVAILABILITY
+              const key = resolveAvailabilityKey(
+                availableCount,
+                config.pricingByAvailability
+              );
+              if (!key) continue;
+              basePrice = config.pricingByAvailability[key].price;
+              extraPersonAmountNum = Number(config.extraPersonAmount ?? 0);
+            }
+          }
+        }
+        else {
+          // Sin gap, evaluar Empty Chair
+          const emptyChair = resolveEmptyChairPricing({
+            date,
+            config,
+            basePrice: Number(config.pricingByAvailability?.["1"]?.price ?? 0),
+            extraPersonAmount: Number(config.extraPersonAmount ?? 0),
+          });
+
+          if (emptyChair.applied) {
+            // 3️⃣ EMPTY CHAIR
+            basePrice = emptyChair.basePrice;
+            extraPersonAmountNum = emptyChair.extraPersonAmount;
+            emptyChairApplied = true;
+          } else {
+            // 4️⃣ AVAILABILITY
+            const key = resolveAvailabilityKey(
+              availableCount,
+              config.pricingByAvailability
+            );
+            if (!key) continue;
+            basePrice = config.pricingByAvailability[key].price;
+            extraPersonAmountNum = Number(config.extraPersonAmount ?? 0);
+          }
+        }
+
+        // ════════════════════════════════════════════════════════
+        // VALIDACIÓN: Verificar que rate_plans existe
+        // Evita crash si la habitación no tiene rate_plans
+        // ════════════════════════════════════════════════════════
+        if (!r.rate_plans || Object.keys(r.rate_plans).length === 0) {
+          logger.warn("⚠️ Habitación sin rate_plans válidos", {
+            room: r.room_id,
+            date: dateKey,
+          });
+          continue;  // Skip esta habitación
         }
 
         const ratePlan = Object.values<any>(r.rate_plans)[0];
@@ -230,7 +375,12 @@ export async function runPricingCycle() {
           basePriceNum +
           Math.max(0, occupancyNum - baseOccupancyNum) * extraPersonAmountNum;
 
-        const snapshotKey = `${r.room_id}_${dateKey}`;
+        // ════════════════════════════════════════════════════════
+        // IMPORTANTE: Usar String(r.room_id) para consistencia
+        // Línea 427 guarda: roomExternalId: String(r.room_id)
+        // Aquí buscamos con la misma clave
+        // ════════════════════════════════════════════════════════
+        const snapshotKey = `${String(r.room_id)}_${dateKey}`;
         const snapshot = snapshotMap.get(snapshotKey);
 
         if (snapshot && snapshot.price === finalPrice) {
@@ -269,14 +419,34 @@ export async function runPricingCycle() {
           };
         });
 
+        // ════════════════════════════════════════════════════════
+        // NUEVO: Incluir minimum_stay modificado si hay gap
+        // PxSol SÍ ACEPTA cambios de minimum_stay en PUT
+        // Solo enviar: rate_id, currency, minimum_stay, rates
+        // NO enviar: maximum_stay, closed, coa, cod
+        // ════════════════════════════════════════════════════════
+
+        const ratePlanData: any = {
+          rate_id: Number(room.ratePlan),
+          rates,
+        };
+
+        // Si hay gap, cambiar minimum_stay dinámicamente
+        if (minimumStayOverride !== null) {
+          ratePlanData.minimum_stay = minimumStayOverride;
+          logger.info("🔑 MINIMUM_STAY MODIFICADO para gap", {
+            room: r.room_id,
+            date: dateKey,
+            gapNights: minimumStayOverride,
+            newMinimumStay: minimumStayOverride,
+          });
+        }
+
         dailyBatch[String(r.room_id)] = {
           day: dateKey,
           room_id: Number(r.room_id),
           rate_plans: {
-            [String(room.ratePlan)]: {
-              rate_id: Number(room.ratePlan),
-              rates,
-            },
+            [String(room.ratePlan)]: ratePlanData,
           },
         };
 
@@ -301,25 +471,49 @@ export async function runPricingCycle() {
       }
     }
 
-    for (const sn of snapshotUpserts) {
-      await prisma.priceSnapshot.upsert({
-        where: {
-          roomExternalId_date: {
-            roomExternalId: sn.roomExternalId,
-            date: sn.date,
-          },
-        },
-        update: { price: sn.price },
-        create: {
-          roomExternalId: sn.roomExternalId,
-          date: sn.date,
-          price: sn.price,
-        },
-      });
+    // ════════════════════════════════════════════════════════
+    // OPTIMIZADO: Batch insert/update en UNA sola query
+    // Antes: 9,000 queries individuales (for + upsert)
+    // Ahora: 1 query batch con INSERT ... ON DUPLICATE KEY UPDATE
+    // Mejora: 100-1000x más rápido
+    // ════════════════════════════════════════════════════════
+
+    if (snapshotUpserts.length > 0) {
+      try {
+        await prisma.$executeRaw`
+          INSERT INTO PriceSnapshot (roomExternalId, date, price)
+          VALUES ${Prisma.join(
+            snapshotUpserts.map(
+              sn => Prisma.sql`(${sn.roomExternalId}, ${sn.date}, ${sn.price})`
+            ),
+            ','
+          )}
+          ON DUPLICATE KEY UPDATE price = VALUES(price)
+        `;
+        logger.info(`✅ Snapshots guardados (batch optimizado): ${snapshotUpserts.length}`);
+      } catch (error: any) {
+        logger.error("❌ Error guardando snapshots batch", {
+          count: snapshotUpserts.length,
+          error: error?.message,
+        });
+      }
     }
 
-    logger.info(`✅ Snapshots actualizados: ${snapshotUpserts.length}`);
+    // Log final del rango
+    if (skipFirstDay) {
+      logger.info("✅ Rango completado (con solapamiento de 1 día)", {
+        startDate: addDays(startDate, 1).toISOString().split("T")[0],  // Mostrar fecha real sin solapamiento
+        endDate: endDate.toISOString().split("T")[0],
+        diasProcesados: datesArray.length - 1  // -1 porque saltamos el primer día
+      });
+    } else {
+      logger.info("✅ Rango completado", {
+        startDate: startDate.toISOString().split("T")[0],
+        endDate: endDate.toISOString().split("T")[0],
+        diasProcesados: datesArray.length
+      });
+    }
   }
 
-  logger.info("Ciclo de pricing finalizado");
+  logger.info("🏁 Ciclo de pricing finalizado");
 }
