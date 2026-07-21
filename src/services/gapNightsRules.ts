@@ -58,15 +58,21 @@ export function resolveGapNightsPricing(params: {
 /**
  * Analiza la disponibilidad (quantity) para detectar gaps
  * Devuelve un mapa: fecha → número de noches de gap
+ * IMPORTANTE: Normaliza fechas al formato YYYY-MM-DD para consistencia
  */
 export function detectGapsFromAvailability(availability: any): Map<string, number> {
   const gapNightsMap = new Map<string, number>();
   const datesSorted = Object.keys(availability).sort();
 
+  // Función para normalizar fecha al formato YYYY-MM-DD
+  const normalizeDate = (dateStr: string): string => {
+    return dateStr.split("T")[0]; // Extrae "YYYY-MM-DD" de "YYYY-MM-DDTHH:MM:SSZ" o retorna igual si ya es "YYYY-MM-DD"
+  };
+
   for (let i = 0; i < datesSorted.length - 2; i++) {
-    const date0 = datesSorted[i];
-    const date1 = datesSorted[i + 1];
-    const date2 = datesSorted[i + 2];
+    const date0 = normalizeDate(datesSorted[i]);
+    const date1 = normalizeDate(datesSorted[i + 1]);
+    const date2 = normalizeDate(datesSorted[i + 2]);
 
     // Obtener quantity para cualquier habitación disponible (usar la primera del día)
     const firstRoomDate0 = Object.values<any>(availability[date0])[0];
@@ -85,8 +91,8 @@ export function detectGapsFromAvailability(availability: any): Map<string, numbe
     // PATRÓN 2: Ocupado → Libre → Libre → Ocupado = GAP DE 2 NOCHES
     // Usar else if para dejar explícito que son mutuamente excluyentes
     else if (i + 3 < datesSorted.length) {
-      const date3 = datesSorted[i + 3];
-      const firstRoomDate3 = Object.values<any>(availability[date3])[0];
+      const date3 = normalizeDate(datesSorted[i + 3]);
+      const firstRoomDate3 = Object.values<any>(availability[datesSorted[i + 3]])[0];
       const qty3 = firstRoomDate3?.quantity ?? 0;
 
       if (qty0 === 0 && qty1 > 0 && qty2 > 0 && qty3 === 0) {
