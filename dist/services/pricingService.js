@@ -49,13 +49,14 @@ async function runPricingCycle() {
     if (roomsData.length > 0) {
         try {
             await client_2.prisma.$executeRaw `
-        INSERT INTO Room (externalId, code, name, description, ratePlan)
-        VALUES ${client_1.Prisma.join(roomsData.map(rd => client_1.Prisma.sql `(${rd.externalId}, ${rd.code}, ${rd.name}, ${rd.description}, ${rd.ratePlan})`), ',')}
+        INSERT INTO Room (externalId, code, name, description, ratePlan, updatedAt)
+        VALUES ${client_1.Prisma.join(roomsData.map(rd => client_1.Prisma.sql `(${rd.externalId}, ${rd.code}, ${rd.name}, ${rd.description}, ${rd.ratePlan}, NOW())`), ',')}
         ON DUPLICATE KEY UPDATE
           code = VALUES(code),
           name = VALUES(name),
           description = VALUES(description),
-          ratePlan = VALUES(ratePlan)
+          ratePlan = VALUES(ratePlan),
+          updatedAt = NOW()
       `;
             logger_1.logger.info(`✅ Rooms sincronizados (batch optimizado): ${roomsData.length}`);
         }
@@ -133,7 +134,8 @@ async function runPricingCycle() {
             snapshotMap.set(key, sn);
         }
         const snapshotUpserts = [];
-        // NUEVO: Detectar gaps en todo el rango
+        // NUEVO: Detectar gaps en todo el rango (POR HABITACIÓN - FIX: ahora detecta para cada room individual)
+        // La clave del mapa es ahora `${roomId}_${dateString}` en lugar de solo `${dateString}`
         const gapNightsMap = (0, gapNightsRules_1.detectGapsFromAvailability)(availability);
         logger_1.logger.info("📊 Análisis de gaps completado", {
             gapsDetected: gapNightsMap.size,
@@ -178,8 +180,8 @@ async function runPricingCycle() {
                 const config = category.pricingConfig;
                 const overrideKey = `${category.id}_${dateKey}`;
                 const override = overrideMap.get(overrideKey);
-                // NUEVO: Obtener gap si existe
-                const gapNights = gapNightsMap.get(dateKey) ?? null;
+                // NUEVO: Obtener gap si existe (FIX: ahora busca por ${roomId}_${date}, no solo ${date})
+                const gapNights = gapNightsMap.get(`${String(r.room_id)}_${dateKey}`) ?? null;
                 let basePrice;
                 let extraPersonAmountNum;
                 let emptyChairApplied = false;
@@ -385,9 +387,9 @@ async function runPricingCycle() {
         if (snapshotUpserts.length > 0) {
             try {
                 await client_2.prisma.$executeRaw `
-          INSERT INTO PriceSnapshot (roomExternalId, date, price)
-          VALUES ${client_1.Prisma.join(snapshotUpserts.map(sn => client_1.Prisma.sql `(${sn.roomExternalId}, ${sn.date}, ${sn.price})`), ',')}
-          ON DUPLICATE KEY UPDATE price = VALUES(price)
+          INSERT INTO PriceSnapshot (roomExternalId, date, price, updatedAt)
+          VALUES ${client_1.Prisma.join(snapshotUpserts.map(sn => client_1.Prisma.sql `(${sn.roomExternalId}, ${sn.date}, ${sn.price}, NOW())`), ',')}
+          ON DUPLICATE KEY UPDATE price = VALUES(price), updatedAt = NOW()
         `;
                 logger_1.logger.info(`✅ Snapshots guardados (batch optimizado): ${snapshotUpserts.length}`);
             }

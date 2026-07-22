@@ -56,9 +56,10 @@ export function resolveGapNightsPricing(params: {
 }
 
 /**
- * Analiza la disponibilidad (quantity) para detectar gaps
- * Devuelve un mapa: fecha → número de noches de gap
+ * Analiza la disponibilidad (quantity) para detectar gaps POR HABITACIÓN
+ * Devuelve un mapa: `${roomId}_${fecha}` → número de noches de gap
  * IMPORTANTE: Normaliza fechas al formato YYYY-MM-DD para consistencia
+ * FIX: Ahora detecta gaps para CADA habitación individual, no solo la primera
  */
 export function detectGapsFromAvailability(availability: any): Map<string, number> {
   const gapNightsMap = new Map<string, number>();
@@ -69,7 +70,7 @@ export function detectGapsFromAvailability(availability: any): Map<string, numbe
     return dateStr.split("T")[0];
   };
 
-  logger.info("🔎 INICIANDO detectGapsFromAvailability", {
+  logger.info("🔎 INICIANDO detectGapsFromAvailability (POR HABITACIÓN)", {
     totalDates: datesSorted.length,
     dateRange: `${datesSorted[0]} a ${datesSorted[datesSorted.length - 1]}`
   });
@@ -83,36 +84,46 @@ export function detectGapsFromAvailability(availability: any): Map<string, numbe
     const date1 = normalizeDate(date1Orig);
     const date2 = normalizeDate(date2Orig);
 
-    // Acceder usando el KEY ORIGINAL (no normalizado)
-    const firstRoomDate0 = Object.values<any>(availability[date0Orig])?.[0];
-    const firstRoomDate1 = Object.values<any>(availability[date1Orig])?.[0];
-    const firstRoomDate2 = Object.values<any>(availability[date2Orig])?.[0];
+    // Recolectar todas las habitaciones presentes en el rango
+    const roomIds = new Set<string>([
+      ...Object.keys(availability[date0Orig] ?? {}),
+      ...Object.keys(availability[date1Orig] ?? {}),
+      ...Object.keys(availability[date2Orig] ?? {}),
+    ]);
 
-    const qty0 = firstRoomDate0?.quantity ?? 0;
-    const qty1 = firstRoomDate1?.quantity ?? 0;
-    const qty2 = firstRoomDate2?.quantity ?? 0;
+    // Analizar CADA habitación individualmente
+    for (const roomId of roomIds) {
+      const qty0 = availability[date0Orig]?.[roomId]?.quantity ?? 0;
+      const qty1 = availability[date1Orig]?.[roomId]?.quantity ?? 0;
+      const qty2 = availability[date2Orig]?.[roomId]?.quantity ?? 0;
 
-    logger.debug("🔎 Analizando secuencia", {
-      dates: `${date0} → ${date1} → ${date2}`,
-      quantities: `${qty0} → ${qty1} → ${qty2}`
-    });
+      // PATRÓN 1: Ocupado → Libre → Ocupado = GAP DE 1 NOCHE
+      if (qty0 === 0 && qty1 > 0 && qty2 === 0) {
+        const key = `${roomId}_${date1}`;
+        gapNightsMap.set(key, 1);
+        logger.info("🔍 ✅ GAP de 1 noche DETECTADO", {
+          roomId,
+          date: date1,
+          pattern: `${qty0}→${qty1}→${qty2}`
+        });
+      }
+      // PATRÓN 2: Ocupado → Libre → Libre → Ocupado = GAP DE 2 NOCHES
+      else if (i + 3 < datesSorted.length) {
+        const date3Orig = datesSorted[i + 3];
+        const date3 = normalizeDate(date3Orig);
+        const qty3 = availability[date3Orig]?.[roomId]?.quantity ?? 0;
 
-    // PATRÓN 1: Ocupado → Libre → Ocupado = GAP DE 1 NOCHE
-    if (qty0 === 0 && qty1 > 0 && qty2 === 0) {
-      gapNightsMap.set(date1, 1);
-      logger.info("🔍 ✅ GAP de 1 noche DETECTADO", { date: date1, pattern: `${qty0}→${qty1}→${qty2}` });
-    }
-    // PATRÓN 2: Ocupado → Libre → Libre → Ocupado = GAP DE 2 NOCHES
-    else if (i + 3 < datesSorted.length) {
-      const date3Orig = datesSorted[i + 3];
-      const date3 = normalizeDate(date3Orig);
-      const firstRoomDate3 = Object.values<any>(availability[date3Orig])?.[0];
-      const qty3 = firstRoomDate3?.quantity ?? 0;
-
-      if (qty0 === 0 && qty1 > 0 && qty2 > 0 && qty3 === 0) {
-        gapNightsMap.set(date1, 2);
-        gapNightsMap.set(date2, 2);
-        logger.info("🔍 ✅ GAP de 2 noches DETECTADO", { dates: `${date1} - ${date2}`, pattern: `${qty0}→${qty1}→${qty2}→${qty3}` });
+        if (qty0 === 0 && qty1 > 0 && qty2 > 0 && qty3 === 0) {
+          const key1 = `${roomId}_${date1}`;
+          const key2 = `${roomId}_${date2}`;
+          gapNightsMap.set(key1, 2);
+          gapNightsMap.set(key2, 2);
+          logger.info("🔍 ✅ GAP de 2 noches DETECTADO", {
+            roomId,
+            dates: `${date1} - ${date2}`,
+            pattern: `${qty0}→${qty1}→${qty2}→${qty3}`
+          });
+        }
       }
     }
   }

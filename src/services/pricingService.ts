@@ -179,7 +179,8 @@ export async function runPricingCycle() {
       price: number;
     }> = [];
 
-    // NUEVO: Detectar gaps en todo el rango
+    // NUEVO: Detectar gaps en todo el rango (POR HABITACIÓN - FIX: ahora detecta para cada room individual)
+    // La clave del mapa es ahora `${roomId}_${dateString}` en lugar de solo `${dateString}`
     const gapNightsMap = detectGapsFromAvailability(availability);
     logger.info("📊 Análisis de gaps completado", {
       gapsDetected: gapNightsMap.size,
@@ -231,8 +232,8 @@ export async function runPricingCycle() {
         const overrideKey = `${category.id}_${dateKey}`;
         const override = overrideMap.get(overrideKey);
 
-        // NUEVO: Obtener gap si existe
-        const gapNights = gapNightsMap.get(dateKey) ?? null;
+        // NUEVO: Obtener gap si existe (FIX: ahora busca por ${roomId}_${date}, no solo ${date})
+        const gapNights = gapNightsMap.get(`${String(r.room_id)}_${dateKey}`) ?? null;
 
         let basePrice: number;
         let extraPersonAmountNum: number;
