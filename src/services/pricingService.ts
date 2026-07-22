@@ -69,10 +69,10 @@ export async function runPricingCycle() {
   if (roomsData.length > 0) {
     try {
       await prisma.$executeRaw`
-        INSERT INTO Room (externalId, code, name, description, ratePlan)
+        INSERT INTO Room (externalId, code, name, description, ratePlan, updatedAt)
         VALUES ${Prisma.join(
           roomsData.map(
-            rd => Prisma.sql`(${rd.externalId}, ${rd.code}, ${rd.name}, ${rd.description}, ${rd.ratePlan})`
+            rd => Prisma.sql`(${rd.externalId}, ${rd.code}, ${rd.name}, ${rd.description}, ${rd.ratePlan}, NOW())`
           ),
           ','
         )}
@@ -80,7 +80,8 @@ export async function runPricingCycle() {
           code = VALUES(code),
           name = VALUES(name),
           description = VALUES(description),
-          ratePlan = VALUES(ratePlan)
+          ratePlan = VALUES(ratePlan),
+          updatedAt = NOW()
       `;
       logger.info(`✅ Rooms sincronizados (batch optimizado): ${roomsData.length}`);
     } catch (error: any) {
