@@ -465,14 +465,14 @@ export async function runPricingCycle() {
     if (snapshotUpserts.length > 0) {
       try {
         await prisma.$executeRaw`
-          INSERT INTO PriceSnapshot (roomExternalId, date, price)
+          INSERT INTO PriceSnapshot (roomExternalId, date, price, updatedAt)
           VALUES ${Prisma.join(
             snapshotUpserts.map(
-              sn => Prisma.sql`(${sn.roomExternalId}, ${sn.date}, ${sn.price})`
+              sn => Prisma.sql`(${sn.roomExternalId}, ${sn.date}, ${sn.price}, NOW())`
             ),
             ','
           )}
-          ON DUPLICATE KEY UPDATE price = VALUES(price)
+          ON DUPLICATE KEY UPDATE price = VALUES(price), updatedAt = NOW()
         `;
         logger.info(`✅ Snapshots guardados (batch optimizado): ${snapshotUpserts.length}`);
       } catch (error: any) {
