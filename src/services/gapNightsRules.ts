@@ -66,42 +66,61 @@ export function detectGapsFromAvailability(availability: any): Map<string, numbe
 
   // Función para normalizar fecha al formato YYYY-MM-DD
   const normalizeDate = (dateStr: string): string => {
-    return dateStr.split("T")[0]; // Extrae "YYYY-MM-DD" de "YYYY-MM-DDTHH:MM:SSZ" o retorna igual si ya es "YYYY-MM-DD"
+    return dateStr.split("T")[0];
   };
 
-  for (let i = 0; i < datesSorted.length - 2; i++) {
-    const date0 = normalizeDate(datesSorted[i]);
-    const date1 = normalizeDate(datesSorted[i + 1]);
-    const date2 = normalizeDate(datesSorted[i + 2]);
+  logger.info("🔎 INICIANDO detectGapsFromAvailability", {
+    totalDates: datesSorted.length,
+    dateRange: `${datesSorted[0]} a ${datesSorted[datesSorted.length - 1]}`
+  });
 
-    // Obtener quantity para cualquier habitación disponible (usar la primera del día)
-    const firstRoomDate0 = Object.values<any>(availability[date0])[0];
-    const firstRoomDate1 = Object.values<any>(availability[date1])[0];
-    const firstRoomDate2 = Object.values<any>(availability[date2])[0];
+  for (let i = 0; i < datesSorted.length - 2; i++) {
+    const date0Orig = datesSorted[i];
+    const date1Orig = datesSorted[i + 1];
+    const date2Orig = datesSorted[i + 2];
+
+    const date0 = normalizeDate(date0Orig);
+    const date1 = normalizeDate(date1Orig);
+    const date2 = normalizeDate(date2Orig);
+
+    // Acceder usando el KEY ORIGINAL (no normalizado)
+    const firstRoomDate0 = Object.values<any>(availability[date0Orig])?.[0];
+    const firstRoomDate1 = Object.values<any>(availability[date1Orig])?.[0];
+    const firstRoomDate2 = Object.values<any>(availability[date2Orig])?.[0];
 
     const qty0 = firstRoomDate0?.quantity ?? 0;
     const qty1 = firstRoomDate1?.quantity ?? 0;
     const qty2 = firstRoomDate2?.quantity ?? 0;
 
+    logger.debug("🔎 Analizando secuencia", {
+      dates: `${date0} → ${date1} → ${date2}`,
+      quantities: `${qty0} → ${qty1} → ${qty2}`
+    });
+
     // PATRÓN 1: Ocupado → Libre → Ocupado = GAP DE 1 NOCHE
     if (qty0 === 0 && qty1 > 0 && qty2 === 0) {
       gapNightsMap.set(date1, 1);
-      logger.info("🔍 GAP de 1 noche detectado", { date: date1 });
+      logger.info("🔍 ✅ GAP de 1 noche DETECTADO", { date: date1, pattern: `${qty0}→${qty1}→${qty2}` });
     }
     // PATRÓN 2: Ocupado → Libre → Libre → Ocupado = GAP DE 2 NOCHES
-    // Usar else if para dejar explícito que son mutuamente excluyentes
     else if (i + 3 < datesSorted.length) {
-      const date3 = normalizeDate(datesSorted[i + 3]);
-      const firstRoomDate3 = Object.values<any>(availability[datesSorted[i + 3]])[0];
+      const date3Orig = datesSorted[i + 3];
+      const date3 = normalizeDate(date3Orig);
+      const firstRoomDate3 = Object.values<any>(availability[date3Orig])?.[0];
       const qty3 = firstRoomDate3?.quantity ?? 0;
 
       if (qty0 === 0 && qty1 > 0 && qty2 > 0 && qty3 === 0) {
         gapNightsMap.set(date1, 2);
         gapNightsMap.set(date2, 2);
-        logger.info("🔍 GAP de 2 noches detectado", { dates: `${date1} - ${date2}` });
+        logger.info("🔍 ✅ GAP de 2 noches DETECTADO", { dates: `${date1} - ${date2}`, pattern: `${qty0}→${qty1}→${qty2}→${qty3}` });
       }
     }
   }
+
+  logger.info("🔎 COMPLETADO detectGapsFromAvailability", {
+    gapsFound: gapNightsMap.size,
+    gapDates: Array.from(gapNightsMap.entries())
+  });
 
   return gapNightsMap;
 }

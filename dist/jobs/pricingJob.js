@@ -3,11 +3,27 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.runSingleCycle = runSingleCycle;
 exports.startScheduler = startScheduler;
 const node_cron_1 = __importDefault(require("node-cron"));
 const pricingService_1 = require("../services/pricingService");
 const logger_1 = require("../utils/logger");
 let isRunning = false;
+// ════════════════════════════════════════════════════════
+// PARA GITHUB ACTIONS: Ejecutar SOLO UN CICLO sin scheduler
+// ════════════════════════════════════════════════════════
+async function runSingleCycle() {
+    logger_1.logger.info("🚀 Ejecutando ciclo único de pricing (GitHub Actions)");
+    try {
+        await (0, pricingService_1.runPricingCycle)();
+        logger_1.logger.info("✅ Ciclo completado exitosamente");
+        process.exit(0);
+    }
+    catch (err) {
+        logger_1.logger.error("❌ Error en ciclo de pricing", err);
+        process.exit(1);
+    }
+}
 async function startScheduler() {
     /**
      * ▶️ Ejecutar inmediatamente al iniciar la app
