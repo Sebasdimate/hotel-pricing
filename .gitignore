@@ -80,7 +80,7 @@ out
 
 # Nuxt.js build / generate output
 .nuxt
-dist
+# dist        ← Removed: we need compiled files for deployments
 .output
 
 # Gatsby files
