@@ -226,6 +226,13 @@ export async function runPricingCycle() {
         if (!category.pricingConfig) continue;
         const config = category.pricingConfig as any;
 
+        logger.info("🔍 DEBUG pricingConfig", {
+          room: r.room_id,
+          date: dateKey,
+          hasGapNightsRules: !!config?.gapNightsRules,
+          gapNightsRulesCount: config?.gapNightsRules?.length ?? 0,
+        });
+
         const overrideKey = `${category.id}_${dateKey}`;
         const override = overrideMap.get(overrideKey);
 
