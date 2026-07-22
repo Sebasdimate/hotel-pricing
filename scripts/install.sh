@@ -10,4 +10,7 @@ npm install
 # Generar Prisma client
 npm run prisma:generate
 
+# Compilar TypeScript
+npm run build
+
 echo "✅ Dependencias instaladas"
