@@ -190,7 +190,7 @@ export async function runPricingCycle() {
     const firstDayOfRangeKey = datesArray[0];
 
     for (const [dateKey, roomsByDate] of Object.entries<any>(availability)) {
-      const date = normalizeDate(new Date(dateKey));
+      const date = new Date(dateKey + "T00:00:00Z");
 
       // ════════════════════════════════════════════════════════
       // NUEVO: Si hay solapamiento, ignorar el primer día
@@ -226,12 +226,6 @@ export async function runPricingCycle() {
         if (!category.pricingConfig) continue;
         const config = category.pricingConfig as any;
 
-        logger.info("🔍 DEBUG pricingConfig", {
-          room: r.room_id,
-          date: dateKey,
-          hasGapNightsRules: !!config?.gapNightsRules,
-          gapNightsRulesCount: config?.gapNightsRules?.length ?? 0,
-        });
 
         const overrideKey = `${category.id}_${dateKey}`;
         const override = overrideMap.get(overrideKey);
@@ -248,13 +242,7 @@ export async function runPricingCycle() {
         // ════════════════════════════════════════════════════════
         let minimumStayOverride: number | null = null;
         if (gapNights !== null) {
-          minimumStayOverride = gapNights;  // Cambiar minimum_stay al número de noches del gap
-          logger.info("🔑 MINIMUM_STAY modificado para gap", {
-            room: r.room_id,
-            date: dateKey,
-            gapNights,
-            newMinimumStay: minimumStayOverride,
-          });
+          minimumStayOverride = gapNights;
         }
 
         // ════════════════════════════════════════════════════════
@@ -269,11 +257,6 @@ export async function runPricingCycle() {
           // 1️⃣ OVERRIDE
           basePrice = Number(override.priceInitial);
           extraPersonAmountNum = Number(override.addPerPerson ?? config.extraPersonAmount ?? 0);
-          logger.info("💼 OVERRIDE aplicado", {
-            room: r.room_id,
-            date: dateKey,
-            basePrice,
-          });
         }
         else if (gapNights !== null) {
           // 2️⃣ GAP NIGHTS
@@ -287,7 +270,7 @@ export async function runPricingCycle() {
             extraPersonAmountNum = gapResult.extraPersonAmount!;
             logger.info("🎯 GAP NIGHTS aplicada", {
               room: r.room_id,
-              date: dateKey,
+              date,
               gapNights,
               basePrice,
             });
@@ -408,12 +391,6 @@ export async function runPricingCycle() {
             extraPersonAmount: extraPersonAmountNum,
           });
         }
-
-        logger.info("Precio calculado", {
-          room: r.room_id,
-          date: dateKey,
-          price: finalPrice,
-        });
 
         const MAX_OCCUPANCY = Math.max(baseOccupancyNum, occupancyNum, 4);
         const rates = Array.from({ length: MAX_OCCUPANCY }, (_, i) => {
