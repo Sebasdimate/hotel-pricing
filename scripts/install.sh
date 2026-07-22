@@ -10,8 +10,8 @@ sudo chown -R ubuntu:ubuntu /home/ubuntu/hotel-pricing
 # Limpiar dist anterior para forzar recompilación limpia
 rm -rf dist/
 
-# Instalar dependencias (con --only=production más confiable)
-npm ci --only=production
+# Instalar todas las dependencias (incluyendo devDependencies para compilación)
+npm ci
 
 # Generar Prisma client
 npm run prisma:generate
