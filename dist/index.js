@@ -24,11 +24,12 @@ async function main() {
     logger_1.logger.info(`║ 🔄 SINGLE_CYCLE: ${String(singleCycleMode).padEnd(43)} ║`);
     logger_1.logger.info("╚════════════════════════════════════════════════════════════╝");
     // ════════════════════════════════════════════════════════
-    // Si SINGLE_CYCLE=true (GitHub Actions), ejecutar UN ciclo y terminar
-    // Si no, ejecutar scheduler normal
+    // Si SINGLE_CYCLE=true, ejecutar UN ciclo y terminar (útil para pruebas
+    // manuales, ej: DRY_RUN=true SINGLE_CYCLE=true). Si no, scheduler normal.
+    // En producción (EC2/PM2) NO se usa SINGLE_CYCLE → corre el scheduler.
     // ════════════════════════════════════════════════════════
     if (singleCycleMode) {
-        logger_1.logger.info("📌 Modo de ciclo único (GitHub Actions)");
+        logger_1.logger.info("📌 Modo de ciclo único (SINGLE_CYCLE)");
         await (0, pricingJob_1.runSingleCycle)();
         // runSingleCycle hace process.exit() automáticamente
     }

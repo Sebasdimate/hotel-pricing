@@ -10,10 +10,11 @@ const pricingService_1 = require("../services/pricingService");
 const logger_1 = require("../utils/logger");
 let isRunning = false;
 // ════════════════════════════════════════════════════════
-// PARA GITHUB ACTIONS: Ejecutar SOLO UN CICLO sin scheduler
+// Ejecutar SOLO UN CICLO sin scheduler (pruebas manuales / DRY_RUN).
+// En producción (EC2/PM2) se usa startScheduler(), no esto.
 // ════════════════════════════════════════════════════════
 async function runSingleCycle() {
-    logger_1.logger.info("🚀 Ejecutando ciclo único de pricing (GitHub Actions)");
+    logger_1.logger.info("🚀 Ejecutando ciclo único de pricing");
     try {
         await (0, pricingService_1.runPricingCycle)();
         logger_1.logger.info("✅ Ciclo completado exitosamente");

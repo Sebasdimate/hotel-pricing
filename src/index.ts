@@ -25,11 +25,12 @@ async function main() {
   logger.info("╚════════════════════════════════════════════════════════════╝");
 
   // ════════════════════════════════════════════════════════
-  // Si SINGLE_CYCLE=true (GitHub Actions), ejecutar UN ciclo y terminar
-  // Si no, ejecutar scheduler normal
+  // Si SINGLE_CYCLE=true, ejecutar UN ciclo y terminar (útil para pruebas
+  // manuales, ej: DRY_RUN=true SINGLE_CYCLE=true). Si no, scheduler normal.
+  // En producción (EC2/PM2) NO se usa SINGLE_CYCLE → corre el scheduler.
   // ════════════════════════════════════════════════════════
   if (singleCycleMode) {
-    logger.info("📌 Modo de ciclo único (GitHub Actions)");
+    logger.info("📌 Modo de ciclo único (SINGLE_CYCLE)");
     await runSingleCycle();
     // runSingleCycle hace process.exit() automáticamente
   } else {

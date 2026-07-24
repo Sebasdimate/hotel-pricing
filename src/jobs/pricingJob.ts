@@ -5,10 +5,11 @@ import { logger } from "../utils/logger";
 let isRunning = false;
 
 // ════════════════════════════════════════════════════════
-// PARA GITHUB ACTIONS: Ejecutar SOLO UN CICLO sin scheduler
+// Ejecutar SOLO UN CICLO sin scheduler (pruebas manuales / DRY_RUN).
+// En producción (EC2/PM2) se usa startScheduler(), no esto.
 // ════════════════════════════════════════════════════════
 export async function runSingleCycle() {
-  logger.info("🚀 Ejecutando ciclo único de pricing (GitHub Actions)");
+  logger.info("🚀 Ejecutando ciclo único de pricing");
   try {
     await runPricingCycle();
     logger.info("✅ Ciclo completado exitosamente");

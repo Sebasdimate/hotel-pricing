@@ -3,7 +3,7 @@ import httpClient from "../infra/http/axiosClient";
 import { prisma } from "../infra/prisma/client";
 import { logger } from "../utils/logger";
 import { pxsolEndpoints } from "../repos/pxsolApi";
-import { addMonths, addDays } from "../utils/dateUtils";
+import { addMonths, addDays, formatDate } from "../utils/dateUtils";
 import { resolveEmptyChairPricing } from "./pricingRules";
 import { resolveGapNightsPricing, detectGapsFromAvailability } from "./gapNightsRules";
 
@@ -24,6 +24,37 @@ type RatePlan = {
   }>;
 };
 
+// DRY_RUN=true: calcula todo igual pero NO escribe nada.
+// Ni PUT a PxSol ni snapshots en BD (escribir snapshots haría que la siguiente
+// corrida real creyera que esos precios ya se aplicaron y los saltara).
+const DRY_RUN = process.env.DRY_RUN === "true";
+
+// Cuántos PUT se envían en paralelo. Antes iban de a uno (hasta ~90 por rango en
+// serie), lo que podía hacer que el ciclo pasara de 5 min y se saltara el siguiente.
+// 6 es un punto medio: acelera mucho sin abrumar a PxSol. Ajustable por env.
+const PUT_CONCURRENCY = Math.max(1, Number(process.env.PUT_CONCURRENCY) || 6);
+
+/**
+ * Ejecuta `worker` sobre todos los items con como máximo `limit` en paralelo.
+ * `limit` runners comparten un índice y van tomando el siguiente item libre.
+ * (No hay condición de carrera: en Node los workers solo se intercalan en los
+ * `await`, y los push/set sobre los acumuladores son síncronos.)
+ */
+async function runPutPool<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let i = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const item = items[i++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
 function normalizeDate(date: Date) {
   return new Date(date.setHours(0, 0, 0, 0));
 }
@@ -43,8 +74,60 @@ function resolveAvailabilityKey(
   return null;
 }
 
+/**
+ * Pide la disponibilidad de un rango. Si PxSol responde 400 (rechaza la fecha de
+ * inicio por considerarla pasada), reintenta desde el día siguiente en vez de
+ * perder el rango completo.
+ *
+ * PxSol valida contra una zona horaria adelantada respecto a Colombia, así que a
+ * partir de cierta hora de la tarde deja de aceptar "hoy". No asumimos cuál es esa
+ * hora ni esa zona: reaccionamos al 400 real. Si algún día lo corrigen, este código
+ * aprovecha la hora extra automáticamente.
+ *
+ * `shifted: true` indica que el primer día del rango NO es evaluable como gap (no
+ * hay día anterior con el que comparar), así que quien llama debe saltárselo.
+ */
+export async function fetchAvailabilityWithRetry(startDate: Date, endDate: Date) {
+  try {
+    const resp = await httpClient.get(pxsolEndpoints.availability(startDate, endDate));
+    return { availability: resp.data.data.availability, startDate, shifted: false };
+  } catch (error: any) {
+    if (error?.response?.status !== 400) throw error;
+
+    const shiftedStart = addDays(startDate, 1);
+    logger.warn("⚠️ 400 en GET availability: reintentando desde el día siguiente", {
+      original: formatDate(startDate),
+      reintento: formatDate(shiftedStart),
+      motivo: error?.response?.data?.message,
+    });
+
+    const resp = await httpClient.get(pxsolEndpoints.availability(shiftedStart, endDate));
+    return { availability: resp.data.data.availability, startDate: shiftedStart, shifted: true };
+  }
+}
+
 export async function runPricingCycle() {
   logger.info("🚀 Iniciando ciclo de pricing");
+
+  // Contadores de resumen del ciclo: una sola línea al final vale más que
+  // miles de líneas por habitación/fecha para saber si el ciclo salió sano
+  const cicloInicio = Date.now();
+  const stats = {
+    rangosOk: 0,
+    rangosFallidos: 0,
+    preciosCambiados: 0,
+    gapsAplicados: 0,
+    emptyChairAplicados: 0,
+    putsOk: 0,
+    putsFallidos: 0,
+    putsSimulados: 0,
+    snapshotsGuardados: 0,
+    sinMinStayDefault: 0,  // categorías sin minimumStayDefault configurado (config incompleta)
+  };
+
+  if (DRY_RUN) {
+    logger.warn("🧪 DRY_RUN ACTIVO — no se enviará ningún PUT ni se guardará ningún snapshot");
+  }
 
   const roomsResp = await httpClient.get(pxsolEndpoints.rooms());
   const rooms = roomsResp.data.data.rooms;
@@ -66,7 +149,9 @@ export async function runPricingCycle() {
     };
   });
 
-  if (roomsData.length > 0) {
+  if (roomsData.length > 0 && DRY_RUN) {
+    logger.info(`🧪 [DRY_RUN] sync de Room NO escrito: ${roomsData.length} habitaciones`);
+  } else if (roomsData.length > 0) {
     try {
       await prisma.$executeRaw`
         INSERT INTO Room (externalId, code, name, description, ratePlan, updatedAt)
@@ -118,7 +203,7 @@ export async function runPricingCycle() {
     if (offset > 0) {
       startDate = addDays(startDate, -1);  // Retroceder 1 día
       skipFirstDay = true;  // Flag para ignorar este día en el loop
-      logger.info("🔄 Solapamiento: 1 día anterior para detectar gaps en límite");
+      logger.debug("🔄 Solapamiento: 1 día anterior para detectar gaps en límite");
     }
 
     const endDate = addDays(startDate, 90);
@@ -127,11 +212,15 @@ export async function runPricingCycle() {
 
     let availability: any;
     try {
-      const availResp = await httpClient.get(
-        pxsolEndpoints.availability(startDate, endDate)
-      );
-      availability = availResp.data.data.availability;
+      const res = await fetchAvailabilityWithRetry(startDate, endDate);
+      availability = res.availability;
+      if (res.shifted) {
+        // Nos corrieron un día (400 en "hoy"). El primer día visible (mañana) SÍ se
+        // evalúa ahora con la detección hacia-adelante, así que NO se salta.
+        startDate = res.startDate;
+      }
     } catch (error: any) {
+      stats.rangosFallidos++;
       logger.error("❌ Error GET availability", {
         url: pxsolEndpoints.availability(startDate, endDate),
         status: error?.response?.status,
@@ -179,10 +268,20 @@ export async function runPricingCycle() {
       price: number;
     }> = [];
 
+    // Tareas de PUT acumuladas durante el rango; se envían en paralelo al final.
+    const putTasks: Array<{
+      dateKey: string;
+      dailyBatch: Record<string, any>;
+      daySnapshots: Array<{ roomExternalId: string; date: Date; price: number; snapshotKey: string }>;
+    }> = [];
+
     // NUEVO: Detectar gaps en todo el rango (POR HABITACIÓN - FIX: ahora detecta para cada room individual)
     // La clave del mapa es ahora `${roomId}_${dateString}` en lugar de solo `${dateString}`
-    const gapNightsMap = detectGapsFromAvailability(availability);
-    logger.info("📊 Análisis de gaps completado", {
+    // forwardFirstDay solo en el primer bloque (offset 0): ahí datesSorted[0] es HOY
+    // y no hay día anterior visible. En los demás bloques el primer día es un borde
+    // futuro con vecino real, así que se detecta bidireccional (y además se salta).
+    const gapNightsMap = detectGapsFromAvailability(availability, offset === 0);
+    logger.debug("📊 Análisis de gaps completado", {
       gapsDetected: gapNightsMap.size,
       skipFirstDay
     });
@@ -215,6 +314,14 @@ export async function runPricingCycle() {
       }
 
       const dailyBatch: Record<string, any> = {};
+      // Snapshots de ESTE día, en espera. Solo se confirman a snapshotUpserts si el
+      // PUT a PxSol sale bien; si falla, se descartan para que el próximo ciclo reintente.
+      const daySnapshots: Array<{
+        roomExternalId: string;
+        date: Date;
+        price: number;
+        snapshotKey: string;
+      }> = [];
 
       for (const r of Object.values<any>(roomsByDate)) {
         if (r.quantity <= 0) continue;
@@ -238,6 +345,7 @@ export async function runPricingCycle() {
         let basePrice: number;
         let extraPersonAmountNum: number;
         let emptyChairApplied = false;
+        let emptyChairMinStay: number | undefined;  // minimum_stay propio de la regla de empty chair, si lo trae
 
         // ════════════════════════════════════════════════════════
         // NUEVO: Modificar minimum_stay si hay gap
@@ -270,7 +378,8 @@ export async function runPricingCycle() {
           if (gapResult.applied) {
             basePrice = gapResult.basePrice!;
             extraPersonAmountNum = gapResult.extraPersonAmount!;
-            logger.info("🎯 GAP NIGHTS aplicada", {
+            stats.gapsAplicados++;
+            logger.debug("🎯 GAP NIGHTS aplicada", {
               room: r.room_id,
               date,
               gapNights,
@@ -290,6 +399,7 @@ export async function runPricingCycle() {
               basePrice = emptyChair.basePrice;
               extraPersonAmountNum = emptyChair.extraPersonAmount;
               emptyChairApplied = true;
+              emptyChairMinStay = emptyChair.minimumStay;
             } else {
               // 4️⃣ AVAILABILITY
               const key = resolveAvailabilityKey(
@@ -316,6 +426,7 @@ export async function runPricingCycle() {
             basePrice = emptyChair.basePrice;
             extraPersonAmountNum = emptyChair.extraPersonAmount;
             emptyChairApplied = true;
+            emptyChairMinStay = emptyChair.minimumStay;
           } else {
             // 4️⃣ AVAILABILITY
             const key = resolveAvailabilityKey(
@@ -327,6 +438,8 @@ export async function runPricingCycle() {
             extraPersonAmountNum = Number(config.extraPersonAmount ?? 0);
           }
         }
+
+        if (emptyChairApplied) stats.emptyChairAplicados++;
 
         // ════════════════════════════════════════════════════════
         // VALIDACIÓN: Verificar que rate_plans existe
@@ -342,6 +455,7 @@ export async function runPricingCycle() {
 
         const ratePlan = Object.values<any>(r.rate_plans)[0];
         const occupancyRaw = ratePlan.rates?.[0]?.occupancy ?? config.baseOccupancy;
+        const liveMinStay = ratePlan.minimum_stay;   // min_stay ACTUAL en PxSol (para el skip)
         const basePriceNum = Number(basePrice);
         const occupancyNum = Number(occupancyRaw);
         const baseOccupancyNum = Number(config.baseOccupancy ?? 1);
@@ -367,33 +481,31 @@ export async function runPricingCycle() {
           basePriceNum +
           Math.max(0, occupancyNum - baseOccupancyNum) * extraPersonAmountNum;
 
-        // ════════════════════════════════════════════════════════
-        // IMPORTANTE: Usar String(r.room_id) para consistencia
-        // Línea 427 guarda: roomExternalId: String(r.room_id)
-        // Aquí buscamos con la misma clave
-        // ════════════════════════════════════════════════════════
         const snapshotKey = `${String(r.room_id)}_${dateKey}`;
-        const snapshot = snapshotMap.get(snapshotKey);
 
-        if (snapshot && snapshot.price === finalPrice) {
-          logger.debug("Precio sin cambios", {
-            room: r.room_id,
-            date: dateKey,
-            price: finalPrice,
-          });
-          continue;
+        // ════════════════════════════════════════════════════════
+        // Resolver minimum_stay (gap → empty chair con min propio → default).
+        // ════════════════════════════════════════════════════════
+        const defaultMinStay = Number(config.minimumStayDefault);
+        const hasDefault = Number.isFinite(defaultMinStay) && defaultMinStay >= 1;
+
+        let resolvedMinimumStay: number | null = null;
+        let minStayOrigen: string;
+        if (minimumStayOverride !== null) {
+          resolvedMinimumStay = minimumStayOverride;                 // gap: siempre
+          minStayOrigen = "gap";
+        } else if (emptyChairApplied && emptyChairMinStay !== undefined) {
+          resolvedMinimumStay = Number(emptyChairMinStay);           // empty chair con min propio
+          minStayOrigen = "empty_chair";
+        } else if (hasDefault) {
+          resolvedMinimumStay = defaultMinStay;                      // default de la categoría
+          minStayOrigen = "default";
+        } else {
+          resolvedMinimumStay = null;                                // sin default: no se toca
+          minStayOrigen = "no_configurado_no_se_envia";
         }
 
-        // ✅ Log de emptyChair solo cuando hay cambio real
-        if (emptyChairApplied) {
-          logger.info("🔥 Empty Chair aplicada", {
-            room: r.room_id,
-            date: dateKey,
-            basePrice: basePriceNum,
-            extraPersonAmount: extraPersonAmountNum,
-          });
-        }
-
+        // Array de tarifas que enviaríamos (occ 1..MAX)
         const MAX_OCCUPANCY = Math.max(baseOccupancyNum, occupancyNum, 4);
         const rates = Array.from({ length: MAX_OCCUPANCY }, (_, i) => {
           const occ = i + 1;
@@ -406,27 +518,65 @@ export async function runPricingCycle() {
         });
 
         // ════════════════════════════════════════════════════════
-        // NUEVO: Incluir minimum_stay modificado si hay gap
-        // PxSol SÍ ACEPTA cambios de minimum_stay en PUT
-        // Solo enviar: rate_id, currency, minimum_stay, rates
-        // NO enviar: maximum_stay, closed, coa, cod
+        // SKIP: comparar el PAYLOAD COMPLETO contra lo que está VIVO en PxSol.
+        // No basta con el precio base: si cambia extraPersonAmount o CUALQUIER
+        // tarifa por ocupación, o el min_stay, hay que mandar el PUT. Comparamos
+        // contra la respuesta real de PxSol (fuente de verdad), tarifa por tarifa.
+        // (El snapshot de un solo precio no detectaba cambios en occ 2+.)
         // ════════════════════════════════════════════════════════
+        const liveByOcc = new Map<number, number>(
+          (ratePlan.rates ?? []).map((x: any) => [Number(x.occupancy), Number(x.price)])
+        );
+        let algunaTarifaCambia = false;
+        for (const rt of rates) {
+          if (liveByOcc.get(rt.occupancy) !== rt.price) { algunaTarifaCambia = true; break; }
+        }
+        const minStayCambia = resolvedMinimumStay !== null && resolvedMinimumStay !== liveMinStay;
 
+        if (!algunaTarifaCambia && !minStayCambia) {
+          logger.debug("Sin cambios (payload == PxSol)", {
+            room: r.room_id,
+            date: dateKey,
+            price: finalPrice,
+            minimum_stay: resolvedMinimumStay,
+            liveMinStay,
+          });
+          continue;
+        }
+
+        // A partir de aquí SÍ se manda el PUT.
+        if (resolvedMinimumStay === null) {
+          // Config incompleta (categoría sin minimumStayDefault): no tocamos el
+          // min_stay, pero lo contamos para avisar en el resumen del ciclo.
+          stats.sinMinStayDefault++;
+        }
+
+        // ✅ Log de emptyChair solo cuando hay cambio real
+        if (emptyChairApplied) {
+          logger.debug("🔥 Empty Chair aplicada", {
+            room: r.room_id,
+            date: dateKey,
+            basePrice: basePriceNum,
+            extraPersonAmount: extraPersonAmountNum,
+          });
+        }
+
+        // rate_plans: solo rate_id, rates y (si aplica) minimum_stay.
+        // NO enviar maximum_stay, closed, coa, cod → PxSol responde 422.
+        // El minimum_stay ya se resolvió antes del skip (resolvedMinimumStay).
         const ratePlanData: any = {
           rate_id: Number(room.ratePlan),
           rates,
         };
-
-        // Si hay gap, cambiar minimum_stay dinámicamente
-        if (minimumStayOverride !== null) {
-          ratePlanData.minimum_stay = minimumStayOverride;
-          logger.info("🔑 MINIMUM_STAY MODIFICADO para gap", {
-            room: r.room_id,
-            date: dateKey,
-            gapNights: minimumStayOverride,
-            newMinimumStay: minimumStayOverride,
-          });
+        if (resolvedMinimumStay !== null) {
+          ratePlanData.minimum_stay = resolvedMinimumStay;
         }
+        logger.debug("🔑 minimum_stay resuelto", {
+          room: r.room_id,
+          date: dateKey,
+          minimum_stay: resolvedMinimumStay,
+          origen: minStayOrigen,
+        });
 
         dailyBatch[String(r.room_id)] = {
           day: dateKey,
@@ -436,26 +586,57 @@ export async function runPricingCycle() {
           },
         };
 
-        snapshotUpserts.push({
+        // No confirmamos el snapshot todavía: esperamos a saber si el PUT tuvo éxito.
+        // (stats.preciosCambiados y snapshotMap también se actualizan solo tras el PUT OK)
+        daySnapshots.push({
           roomExternalId: String(r.room_id),
           date,
           price: finalPrice,
+          snapshotKey,
         });
-
-        snapshotMap.set(snapshotKey, { price: finalPrice });
       }
 
+      // No se envía aquí: se acumula y se manda en paralelo al terminar el rango.
       if (Object.keys(dailyBatch).length > 0) {
-        try {
-          await httpClient.put(pxsolEndpoints.updateRates(), {
-            [dateKey]: dailyBatch,
-          });
-          logger.info(`✅ PUT enviado para ${dateKey} | habitaciones: ${Object.keys(dailyBatch).length}`);
-        } catch (error: any) {
-          logger.error(`❌ Error PUT ${dateKey} | status=${error?.response?.status} | ${error?.message}`);
-        }
+        putTasks.push({ dateKey, dailyBatch, daySnapshots });
       }
     }
+
+    // ════════════════════════════════════════════════════════
+    // Envío de los PUT EN PARALELO (antes: uno por día, en serie).
+    // El commit/discard de snapshots se mantiene por tarea: solo se confirman
+    // los del PUT que salió bien; los de un PUT fallido se descartan y se reintentan.
+    // ════════════════════════════════════════════════════════
+    await runPutPool(putTasks, PUT_CONCURRENCY, async ({ dateKey, dailyBatch, daySnapshots }) => {
+      if (DRY_RUN) {
+        stats.putsSimulados++;
+        stats.preciosCambiados += daySnapshots.length;  // en dry-run: lo que SE HABRÍA cambiado
+        logger.info(`🧪 [DRY_RUN] PUT NO enviado para ${dateKey} | habitaciones: ${Object.keys(dailyBatch).length}`);
+        logger.debug("🧪 [DRY_RUN] payload que se habría enviado", { [dateKey]: dailyBatch });
+        return;
+      }
+      try {
+        await httpClient.put(pxsolEndpoints.updateRates(), {
+          [dateKey]: dailyBatch,
+        });
+        stats.putsOk++;
+        // ✅ PUT OK: recién ahora confirmamos los snapshots de este día.
+        for (const sn of daySnapshots) {
+          snapshotUpserts.push({ roomExternalId: sn.roomExternalId, date: sn.date, price: sn.price });
+          snapshotMap.set(sn.snapshotKey, { price: sn.price });
+          stats.preciosCambiados++;
+        }
+        logger.debug(`✅ PUT enviado para ${dateKey} | habitaciones: ${Object.keys(dailyBatch).length}`);
+      } catch (error: any) {
+        stats.putsFallidos++;
+        // ❌ PUT falló: NO guardamos los snapshots de este día. Así, en el próximo
+        // ciclo el precio seguirá viéndose distinto al snapshot y se REINTENTA
+        // (antes se guardaba igual y el fallo se perdía en silencio).
+        logger.error(
+          `❌ Error PUT ${dateKey} | status=${error?.response?.status} | ${error?.message} | snapshots descartados=${daySnapshots.length}`
+        );
+      }
+    });
 
     // ════════════════════════════════════════════════════════
     // OPTIMIZADO: Batch insert/update en UNA sola query
@@ -464,7 +645,9 @@ export async function runPricingCycle() {
     // Mejora: 100-1000x más rápido
     // ════════════════════════════════════════════════════════
 
-    if (snapshotUpserts.length > 0) {
+    if (snapshotUpserts.length > 0 && DRY_RUN) {
+      logger.info(`🧪 [DRY_RUN] snapshots NO guardados: ${snapshotUpserts.length}`);
+    } else if (snapshotUpserts.length > 0) {
       try {
         await prisma.$executeRaw`
           INSERT INTO PriceSnapshot (roomExternalId, date, price, updatedAt)
@@ -476,7 +659,8 @@ export async function runPricingCycle() {
           )}
           ON DUPLICATE KEY UPDATE price = VALUES(price), updatedAt = NOW()
         `;
-        logger.info(`✅ Snapshots guardados (batch optimizado): ${snapshotUpserts.length}`);
+        stats.snapshotsGuardados += snapshotUpserts.length;
+        logger.debug(`✅ Snapshots guardados (batch optimizado): ${snapshotUpserts.length}`);
       } catch (error: any) {
         logger.error("❌ Error guardando snapshots batch", {
           count: snapshotUpserts.length,
@@ -484,6 +668,8 @@ export async function runPricingCycle() {
         });
       }
     }
+
+    stats.rangosOk++;
 
     // Log final del rango
     if (skipFirstDay) {
@@ -501,5 +687,21 @@ export async function runPricingCycle() {
     }
   }
 
-  logger.info("🏁 Ciclo de pricing finalizado");
+  const resumen = {
+    duracionSeg: Number(((Date.now() - cicloInicio) / 1000).toFixed(1)),
+    ...stats,
+  };
+
+  if (stats.sinMinStayDefault > 0) {
+    logger.warn("⚠️ Hubo cálculos sin minimumStayDefault configurado (se usó 1 como fallback)", {
+      ocurrencias: stats.sinMinStayDefault,
+      accion: "Configurar minimumStayDefault en el pricingConfig de esas categorías",
+    });
+  }
+
+  if (stats.rangosFallidos > 0 || stats.putsFallidos > 0) {
+    logger.error("🏁 Ciclo de pricing finalizado CON FALLOS", resumen);
+  } else {
+    logger.info("🏁 Ciclo de pricing finalizado", resumen);
+  }
 }

@@ -7,7 +7,9 @@ const axios_1 = __importDefault(require("axios"));
 const axios_retry_1 = __importDefault(require("axios-retry"));
 const logger_1 = require("../../utils/logger");
 const client = axios_1.default.create({
-    timeout: 10000,
+    // 60s: pedir 90 días x 40 habitaciones no cabe en 10s y provocaba que se
+    // perdieran rangos completos en silencio (error.log lleno de timeouts)
+    timeout: 60000,
     headers: { "Content-Type": "application/json" },
 });
 (0, axios_retry_1.default)(client, {
@@ -24,7 +26,7 @@ client.interceptors.request.use((config) => {
     if (token) {
         config.headers.Authorization = `Bearer ${token}`;
     }
-    logger_1.logger.info("➡️ Request:", {
+    logger_1.logger.debug("➡️ Request:", {
         url: config.url,
         method: config.method,
     });
@@ -34,7 +36,9 @@ client.interceptors.request.use((config) => {
     return Promise.reject(error);
 });
 client.interceptors.response.use(res => res, err => {
-    logger_1.logger.error("HTTP Error", { message: err.message, url: err.config?.url });
+    // debug y no error: axios-retry reintenta 3 veces (4 logs por fallo) y
+    // quien llama ya loguea el error con contexto útil en su catch
+    logger_1.logger.debug("HTTP Error", { message: err.message, url: err.config?.url });
     return Promise.reject(err);
 });
 exports.default = client;

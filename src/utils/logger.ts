@@ -2,6 +2,10 @@ import { createLogger, format, transports } from "winston";
 
 const { combine, timestamp, printf, colorize, splat } = format;
 
+// Rotación de archivos: tope duro de 25 MB por archivo de log (5 MB x 5 rotaciones)
+const MAX_LOG_SIZE = 5 * 1024 * 1024;
+const MAX_LOG_FILES = 5;
+
 function safeStringify(obj: any): string {
   const seen = new WeakSet();
   return JSON.stringify(obj, (key, value) => {
@@ -10,7 +14,7 @@ function safeStringify(obj: any): string {
       seen.add(value);
     }
     return value;
-  }, 2);
+  });
 }
 
 const logFormat = printf(({ level, message, timestamp, ...meta }) => {
@@ -23,7 +27,7 @@ const logFormat = printf(({ level, message, timestamp, ...meta }) => {
 });
 
 export const logger = createLogger({
-  level: "info",
+  level: process.env.LOG_LEVEL || "info",
   format: combine(
     splat(),
     timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
@@ -33,7 +37,18 @@ export const logger = createLogger({
     new transports.Console({
       format: combine(colorize(), splat(), timestamp(), logFormat),
     }),
-    new transports.File({ filename: "logs/error.log", level: "error" }),
-    new transports.File({ filename: "logs/combined.log" }),
+    new transports.File({
+      filename: "logs/error.log",
+      level: "error",
+      maxsize: MAX_LOG_SIZE,
+      maxFiles: MAX_LOG_FILES,
+      tailable: true,
+    }),
+    new transports.File({
+      filename: "logs/combined.log",
+      maxsize: MAX_LOG_SIZE,
+      maxFiles: MAX_LOG_FILES,
+      tailable: true,
+    }),
   ],
 });

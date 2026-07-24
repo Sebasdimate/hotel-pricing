@@ -47,15 +47,21 @@ function resolveGapNightsPricing(params) {
  * Devuelve un mapa: `${roomId}_${fecha}` → número de noches de gap
  * IMPORTANTE: Normaliza fechas al formato YYYY-MM-DD para consistencia
  * FIX: Ahora detecta gaps para CADA habitación individual, no solo la primera
+ *
+ * @param forwardFirstDay  Si es true, además aplica detección HACIA ADELANTE al
+ *   primer día visible (hoy). El patrón normal (ocupado→libre→ocupado) necesita el
+ *   día anterior, que la API no entrega para hoy. Con esto, si hoy está libre se
+ *   cuenta cuántas noches libres hay hasta la próxima reserva: 1 → gap 1, 2 → gap 2,
+ *   3+ → silla vacía (no gap). Solo debe usarse en el PRIMER bloque (offset 0).
  */
-function detectGapsFromAvailability(availability) {
+function detectGapsFromAvailability(availability, forwardFirstDay = false) {
     const gapNightsMap = new Map();
     const datesSorted = Object.keys(availability).sort();
     // Función para normalizar fecha al formato YYYY-MM-DD
     const normalizeDate = (dateStr) => {
         return dateStr.split("T")[0];
     };
-    logger_1.logger.info("🔎 INICIANDO detectGapsFromAvailability (POR HABITACIÓN)", {
+    logger_1.logger.debug("🔎 INICIANDO detectGapsFromAvailability (POR HABITACIÓN)", {
         totalDates: datesSorted.length,
         dateRange: `${datesSorted[0]} a ${datesSorted[datesSorted.length - 1]}`
     });
@@ -81,7 +87,7 @@ function detectGapsFromAvailability(availability) {
             if (qty0 === 0 && qty1 > 0 && qty2 === 0) {
                 const key = `${roomId}_${date1}`;
                 gapNightsMap.set(key, 1);
-                logger_1.logger.info("🔍 ✅ GAP de 1 noche DETECTADO", {
+                logger_1.logger.debug("🔍 ✅ GAP de 1 noche DETECTADO", {
                     roomId,
                     date: date1,
                     pattern: `${qty0}→${qty1}→${qty2}`
@@ -97,7 +103,7 @@ function detectGapsFromAvailability(availability) {
                     const key2 = `${roomId}_${date2}`;
                     gapNightsMap.set(key1, 2);
                     gapNightsMap.set(key2, 2);
-                    logger_1.logger.info("🔍 ✅ GAP de 2 noches DETECTADO", {
+                    logger_1.logger.debug("🔍 ✅ GAP de 2 noches DETECTADO", {
                         roomId,
                         dates: `${date1} - ${date2}`,
                         pattern: `${qty0}→${qty1}→${qty2}→${qty3}`
@@ -106,9 +112,49 @@ function detectGapsFromAvailability(availability) {
             }
         }
     }
-    logger_1.logger.info("🔎 COMPLETADO detectGapsFromAvailability", {
-        gapsFound: gapNightsMap.size,
-        gapDates: Array.from(gapNightsMap.entries())
-    });
+    // ════════════════════════════════════════════════════════
+    // DETECCIÓN HACIA ADELANTE para el PRIMER día (hoy).
+    // El patrón bidireccional nunca marca el primer día (necesita el día anterior,
+    // que la API no da para hoy). Aquí lo tratamos como borde izquierdo: si hoy está
+    // libre, contamos las noches libres hasta la próxima reserva.
+    //   hoy libre, mañana ocupado            → hueco de 1 noche (hoy)
+    //   hoy y mañana libres, pasado ocupado  → hueco de 2 noches (hoy y mañana)
+    //   3+ libres                            → silla vacía (no gap)
+    // ════════════════════════════════════════════════════════
+    if (forwardFirstDay && datesSorted.length >= 2) {
+        const d0Orig = datesSorted[0];
+        const d1Orig = datesSorted[1];
+        const d2Orig = datesSorted[2]; // puede ser undefined si el rango es muy corto
+        const d0 = normalizeDate(d0Orig);
+        const d1 = normalizeDate(d1Orig);
+        for (const roomId of Object.keys(availability[d0Orig] ?? {})) {
+            const q0 = availability[d0Orig]?.[roomId]?.quantity ?? 0;
+            if (q0 <= 0)
+                continue; // hoy ocupado: nada que vender, no es hueco
+            const q1 = availability[d1Orig]?.[roomId]?.quantity ?? 0;
+            if (q1 === 0) {
+                // hoy libre, mañana ocupado → hueco de 1 noche (hoy)
+                gapNightsMap.set(`${roomId}_${d0}`, 1);
+                logger_1.logger.debug("🔍 ✅ GAP de 1 noche DETECTADO (hacia adelante, hoy)", {
+                    roomId, date: d0, pattern: `${q0}→${q1}`,
+                });
+            }
+            else if (d2Orig !== undefined) {
+                const q2 = availability[d2Orig]?.[roomId]?.quantity ?? 0;
+                if (q2 === 0) {
+                    // hoy y mañana libres, pasado ocupado → hueco de 2 noches
+                    gapNightsMap.set(`${roomId}_${d0}`, 2);
+                    gapNightsMap.set(`${roomId}_${d1}`, 2);
+                    logger_1.logger.debug("🔍 ✅ GAP de 2 noches DETECTADO (hacia adelante, hoy)", {
+                        roomId, dates: `${d0} - ${d1}`, pattern: `${q0}→${q1}→${q2}`,
+                    });
+                }
+                // else: 3+ noches libres → silla vacía, no se marca gap
+            }
+        }
+    }
+    // Solo el conteo en info: el detalle completo puede ser de miles de entradas
+    logger_1.logger.info("🔎 Gaps detectados", { gapsFound: gapNightsMap.size });
+    logger_1.logger.debug("Detalle de gaps", { gapDates: Array.from(gapNightsMap.entries()) });
     return gapNightsMap;
 }
